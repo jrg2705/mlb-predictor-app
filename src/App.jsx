@@ -26,7 +26,14 @@ function loadHistory() {
 function saveToHistory(entry) {
   try {
     const current = loadHistory();
-    const updated = [entry, ...current].slice(0, MAX_HISTORY);
+    const entryDay = entry.date.split("T")[0];
+    // Remove any existing entry for the same matchup on the same day
+    const filtered = current.filter(e => {
+      const sameDay = e.date.split("T")[0] === entryDay;
+      const sameMatchup = e.home === entry.home && e.away === entry.away;
+      return !(sameDay && sameMatchup);
+    });
+    const updated = [entry, ...filtered].slice(0, MAX_HISTORY);
     localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
     return updated;
   } catch {
@@ -160,6 +167,7 @@ export default function MLBPredictor() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [realStats, setRealStats] = useState(null);
+  const [gameContext, setGameContext] = useState(null);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const [showStats, setShowStats] = useState(false);
@@ -186,6 +194,7 @@ export default function MLBPredictor() {
     setError("");
     setResult(null);
     setRealStats(null);
+    setGameContext(null);
     setShowStats(false);
     setLoading(true);
     setTab("predictor");
@@ -202,6 +211,7 @@ export default function MLBPredictor() {
       if (!res.ok) throw new Error(data.error || "Error del servidor");
       setResult(data.analysis);
       setRealStats(data.realStats);
+      setGameContext(data.gameContext || null);
 
       const entry = {
         id: Date.now(),
@@ -306,6 +316,7 @@ ${result.away_team_runs?.reasoning}
     setAway(entry.away);
     setResult(entry.analysis);
     setRealStats(null);
+    setGameContext(null);
     setTab("predictor");
   };
 
@@ -466,6 +477,65 @@ ${result.away_team_runs?.reasoning}
                 </div>
               )}
 
+              {gameContext && (gameContext.homePitcher || gameContext.awayPitcher) && (
+                <div style={{
+                  background: "linear-gradient(135deg, #142235, #16314a)", border: "1px solid #2D6A4F",
+                  borderRadius: "12px", padding: "20px", marginBottom: "14px"
+                }}>
+                  <div style={{ fontSize: "11px", color: "#F4A261", letterSpacing: "0.15em", marginBottom: "14px" }}>
+                    ⚾ ABRIDORES PROBABLES CONFIRMADOS
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                    <div>
+                      <div style={{ fontSize: "11px", color: "#4A90D9", marginBottom: "4px" }}>VISITANTE — {away}</div>
+                      {gameContext.awayPitcher ? (
+                        <>
+                          <div style={{ fontSize: "14px", fontWeight: 700, color: "#F0F4F8", marginBottom: "4px" }}>
+                            {gameContext.awayPitcher.name}
+                          </div>
+                          <div style={{ fontSize: "11px", color: "#7a9ab8" }}>
+                            ERA {gameContext.awayPitcher.era} · WHIP {gameContext.awayPitcher.whip} · K/9 {gameContext.awayPitcher.strikeoutsPer9}
+                          </div>
+                        </>
+                      ) : (
+                        <span style={{ fontSize: "12px", color: "#7a9ab8", fontStyle: "italic" }}>No confirmado aún</span>
+                      )}
+                    </div>
+                    <div>
+                      <div style={{ fontSize: "11px", color: "#F4A261", marginBottom: "4px" }}>LOCAL — {home}</div>
+                      {gameContext.homePitcher ? (
+                        <>
+                          <div style={{ fontSize: "14px", fontWeight: 700, color: "#F0F4F8", marginBottom: "4px" }}>
+                            {gameContext.homePitcher.name}
+                          </div>
+                          <div style={{ fontSize: "11px", color: "#7a9ab8" }}>
+                            ERA {gameContext.homePitcher.era} · WHIP {gameContext.homePitcher.whip} · K/9 {gameContext.homePitcher.strikeoutsPer9}
+                          </div>
+                        </>
+                      ) : (
+                        <span style={{ fontSize: "12px", color: "#7a9ab8", fontStyle: "italic" }}>No confirmado aún</span>
+                      )}
+                    </div>
+                  </div>
+                  {gameContext.lineup && (gameContext.lineup.home || gameContext.lineup.away) && (
+                    <div style={{ marginTop: "12px", paddingTop: "12px", borderTop: "1px solid #1e3a52" }}>
+                      <span style={{ fontSize: "11px", color: "#2D6A4F", fontWeight: 700 }}>
+                        ✅ Alineación titular confirmada incluida en el análisis
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {result.data_confidence_note && (
+                <p style={{
+                  fontSize: "11px", color: "#7a9ab8", textAlign: "center",
+                  marginBottom: "14px", fontStyle: "italic", padding: "0 8px"
+                }}>
+                  ℹ️ {result.data_confidence_note}
+                </p>
+              )}
+
               <div style={{ background: "#142235", border: "1px solid #1e3a52", borderRadius: "12px", padding: "20px", marginBottom: "14px" }}>
                 <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "14px" }}>
                   PROBABILIDADES DE VICTORIA (MONEYLINE)
@@ -479,6 +549,7 @@ ${result.away_team_runs?.reasoning}
                   <WinBar pct={result.home_win_pct} color="#F4A261" />
                 </div>
               </div>
+
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
                 <MarketCard
