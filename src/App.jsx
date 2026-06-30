@@ -189,6 +189,8 @@ export default function MLBPredictor() {
     setShowStats(false);
     setLoading(true);
     setTab("predictor");
+    setHome(homeTeam);
+    setAway(awayTeam);
 
     try {
       const res = await fetch("/api/analyze", {
