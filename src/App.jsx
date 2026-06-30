@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 const TEAMS = [
   "New York Yankees", "Los Angeles Dodgers", "Houston Astros", "Atlanta Braves",
@@ -10,6 +10,58 @@ const TEAMS = [
   "Oakland Athletics", "Pittsburgh Pirates", "Colorado Rockies", "Washington Nationals",
   "St. Louis Cardinals", "Los Angeles Angels",
 ];
+
+const HISTORY_KEY = "mlb_predictor_history";
+const MAX_HISTORY = 30;
+
+function loadHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveToHistory(entry) {
+  try {
+    const current = loadHistory();
+    const updated = [entry, ...current].slice(0, MAX_HISTORY);
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+    return updated;
+  } catch {
+    return loadHistory();
+  }
+}
+
+function clearHistory() {
+  localStorage.removeItem(HISTORY_KEY);
+}
+
+async function requestNotificationPermission() {
+  if (!("Notification" in window)) return "unsupported";
+  if (Notification.permission === "granted") return "granted";
+  if (Notification.permission === "denied") return "denied";
+  const result = await Notification.requestPermission();
+  return result;
+}
+
+function scheduleGameNotification(game) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const gameTime = new Date(game.gameDate).getTime();
+  const notifyTime = gameTime - 15 * 60 * 1000;
+  const now = Date.now();
+  const delay = notifyTime - now;
+  if (delay <= 0) return;
+  const maxDelay = 2 * 60 * 60 * 1000;
+  if (delay > maxDelay) return;
+  setTimeout(() => {
+    new Notification("⚾ Partido por comenzar", {
+      body: `${game.away.name} @ ${game.home.name} empieza en 15 minutos`,
+      icon: "/favicon.svg",
+    });
+  }, delay);
+}
 
 const DiamondLoader = () => (
   <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "16px", padding: "40px" }}>
@@ -71,17 +123,12 @@ const MarketCard = ({ icon, title, pick, line, confidence_pct, reasoning, pickCo
   const isPositive = pick === "SI" || pick === "OVER";
   const pickColor = isPositive ? (pickColorYes || "#E63946") : (pickColorNo || "#2D6A4F");
   return (
-    <div style={{
-      background: "#142235", border: "1px solid #1e3a52",
-      borderRadius: "10px", padding: "16px"
-    }}>
+    <div style={{ background: "#142235", border: "1px solid #1e3a52", borderRadius: "10px", padding: "16px" }}>
       <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "8px" }}>
         {icon} {title}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px", flexWrap: "wrap" }}>
-        <span style={{
-          fontSize: "22px", fontWeight: 900, color: pickColor
-        }}>{pick}</span>
+        <span style={{ fontSize: "22px", fontWeight: 900, color: pickColor }}>{pick}</span>
         {line !== undefined && (
           <span style={{ fontSize: "14px", color: "#7a9ab8" }}>línea: <strong style={{ color: "#F0F4F8" }}>{line}</strong></span>
         )}
@@ -94,7 +141,20 @@ const MarketCard = ({ icon, title, pick, line, confidence_pct, reasoning, pickCo
   );
 };
 
+const TabButton = ({ active, onClick, children }) => (
+  <button onClick={onClick} style={{
+    background: active ? "#2D6A4F" : "transparent",
+    color: active ? "#F0F4F8" : "#7a9ab8",
+    border: `1px solid ${active ? "#2D6A4F" : "#1e3a52"}`,
+    borderRadius: "8px", padding: "8px 16px", fontSize: "12px", fontWeight: 700,
+    cursor: "pointer", letterSpacing: "0.05em", transition: "all 0.2s",
+  }}>
+    {children}
+  </button>
+);
+
 export default function MLBPredictor() {
+  const [tab, setTab] = useState("predictor");
   const [home, setHome] = useState("");
   const [away, setAway] = useState("");
   const [loading, setLoading] = useState(false);
@@ -104,8 +164,22 @@ export default function MLBPredictor() {
   const [copied, setCopied] = useState(false);
   const [showStats, setShowStats] = useState(false);
 
-  const analyze = async () => {
-    if (!home || !away || home === away) {
+  const [todayGames, setTodayGames] = useState([]);
+  const [loadingGames, setLoadingGames] = useState(false);
+  const [gamesError, setGamesError] = useState("");
+
+  const [history, setHistory] = useState([]);
+
+  const [notifPermission, setNotifPermission] = useState(
+    typeof Notification !== "undefined" ? Notification.permission : "unsupported"
+  );
+
+  useEffect(() => {
+    setHistory(loadHistory());
+  }, []);
+
+  const analyze = async (homeTeam = home, awayTeam = away) => {
+    if (!homeTeam || !awayTeam || homeTeam === awayTeam) {
       setError("Selecciona dos equipos diferentes.");
       return;
     }
@@ -114,17 +188,27 @@ export default function MLBPredictor() {
     setRealStats(null);
     setShowStats(false);
     setLoading(true);
+    setTab("predictor");
 
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ home, away }),
+        body: JSON.stringify({ home: homeTeam, away: awayTeam }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Error del servidor");
       setResult(data.analysis);
       setRealStats(data.realStats);
+
+      const entry = {
+        id: Date.now(),
+        date: new Date().toISOString(),
+        home: homeTeam,
+        away: awayTeam,
+        analysis: data.analysis,
+      };
+      setHistory(saveToHistory(entry));
     } catch (e) {
       setError(`Error: ${e.message}`);
     } finally {
@@ -132,11 +216,53 @@ export default function MLBPredictor() {
     }
   };
 
+  const loadTodayGames = async () => {
+    setLoadingGames(true);
+    setGamesError("");
+    try {
+      const res = await fetch("/api/today-games");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error al cargar partidos");
+      setTodayGames(data.games || []);
+
+      if (notifPermission === "granted") {
+        data.games?.forEach(g => {
+          if (g.status === "Scheduled" || g.status === "Pre-Game") {
+            scheduleGameNotification(g);
+          }
+        });
+      }
+    } catch (e) {
+      setGamesError(`Error: ${e.message}`);
+    } finally {
+      setLoadingGames(false);
+    }
+  };
+
+  useEffect(() => {
+    if (tab === "today" && todayGames.length === 0 && !loadingGames) {
+      loadTodayGames();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
+  const handleEnableNotifications = async () => {
+    const result = await requestNotificationPermission();
+    setNotifPermission(result);
+    if (result === "granted" && todayGames.length > 0) {
+      todayGames.forEach(g => {
+        if (g.status === "Scheduled" || g.status === "Pre-Game") {
+          scheduleGameNotification(g);
+        }
+      });
+    }
+  };
+
   const handleCopy = () => {
     if (!result) return;
     const text = `=== MLB PREDICTOR — ANÁLISIS CON DATOS REALES ===
 PARTIDO: ${away} (V) vs ${home} (L)
-FUENTE: MLB Stats API ${new Date().getFullYear()} + Claude AI
+FUENTE: MLB Stats API ${new Date().getFullYear()} + Groq AI
 
 PROBABILIDADES: ${away} ${result.away_win_pct}% | ${home} ${result.home_win_pct}%
 
@@ -168,10 +294,31 @@ ${result.away_team_runs?.reasoning}
     });
   };
 
+  const handleClearHistory = () => {
+    clearHistory();
+    setHistory([]);
+  };
+
+  const loadFromHistory = (entry) => {
+    setHome(entry.home);
+    setAway(entry.away);
+    setResult(entry.analysis);
+    setRealStats(null);
+    setTab("predictor");
+  };
+
   const selectStyle = {
     width: "100%", background: "#142235", border: "1px solid #1e3a52",
     color: "#F0F4F8", borderRadius: "8px", padding: "12px",
     fontSize: "14px", cursor: "pointer", outline: "none",
+  };
+
+  const formatGameTime = (iso) => {
+    try {
+      return new Date(iso).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+    } catch {
+      return "";
+    }
   };
 
   return (
@@ -185,10 +332,9 @@ ${result.away_team_runs?.reasoning}
         button:hover:not(:disabled) { filter: brightness(1.1); }
       `}</style>
 
-      {/* Header */}
-      <div style={{ textAlign: "center", marginBottom: "32px" }}>
+      <div style={{ textAlign: "center", marginBottom: "24px" }}>
         <div style={{ fontSize: "11px", letterSpacing: "0.25em", color: "#4A90D9", textTransform: "uppercase", marginBottom: "6px" }}>
-          ⚾ MLB Stats API · Claude AI · Datos Reales
+          ⚾ MLB Stats API · Groq AI · Datos Reales
         </div>
         <h1 style={{
           fontSize: "clamp(28px, 6vw, 46px)", fontWeight: 900, margin: "0 0 6px",
@@ -200,200 +346,334 @@ ${result.away_team_runs?.reasoning}
         </p>
       </div>
 
-      {/* Selectors */}
-      <div style={{
-        display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "14px",
-        alignItems: "center", maxWidth: "680px", margin: "0 auto 20px",
-      }}>
-        <div>
-          <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "7px", textAlign: "center" }}>VISITANTE</div>
-          <select value={away} onChange={e => setAway(e.target.value)} style={selectStyle}>
-            <option value="">Seleccionar…</option>
-            {TEAMS.map(t => <option key={t}>{t}</option>)}
-          </select>
-        </div>
-        <div style={{
-          width: "40px", height: "40px", borderRadius: "50%",
-          background: "#142235", border: "1px solid #2D6A4F",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: "11px", fontWeight: 700, color: "#F4A261", flexShrink: 0,
-        }}>VS</div>
-        <div>
-          <div style={{ fontSize: "11px", color: "#F4A261", letterSpacing: "0.15em", marginBottom: "7px", textAlign: "center" }}>LOCAL</div>
-          <select value={home} onChange={e => setHome(e.target.value)} style={selectStyle}>
-            <option value="">Seleccionar…</option>
-            {TEAMS.map(t => <option key={t}>{t}</option>)}
-          </select>
-        </div>
+      <div style={{ display: "flex", gap: "8px", justifyContent: "center", marginBottom: "24px", flexWrap: "wrap" }}>
+        <TabButton active={tab === "predictor"} onClick={() => setTab("predictor")}>⚾ Predictor</TabButton>
+        <TabButton active={tab === "today"} onClick={() => setTab("today")}>📅 Partidos de Hoy</TabButton>
+        <TabButton active={tab === "history"} onClick={() => setTab("history")}>🕓 Historial ({history.length})</TabButton>
       </div>
 
-      {error && <p style={{ color: "#e74c3c", textAlign: "center", fontSize: "13px", marginBottom: "14px" }}>{error}</p>}
-
-      {/* CTA */}
-      <div style={{ textAlign: "center", marginBottom: "32px" }}>
-        <button onClick={analyze} disabled={loading} style={{
-          background: loading ? "#1e3a52" : "linear-gradient(135deg, #2D6A4F, #1a4a35)",
-          color: loading ? "#4a6a88" : "#F0F4F8", border: "none", borderRadius: "8px",
-          padding: "14px 36px", fontSize: "15px", fontWeight: 700,
-          cursor: loading ? "not-allowed" : "pointer", letterSpacing: "0.05em",
-          boxShadow: loading ? "none" : "0 4px 20px rgba(45,106,79,0.4)", transition: "all 0.2s",
-        }}>
-          {loading ? "Consultando MLB Stats API…" : "⚾ ANALIZAR CON DATOS REALES"}
-        </button>
-      </div>
-
-      {loading && <DiamondLoader />}
-
-      {result && !loading && (
-        <div style={{ maxWidth: "680px", margin: "0 auto", animation: "fadeIn .5s ease" }}>
-
-          {/* Top actions */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px", flexWrap: "wrap", gap: "8px" }}>
-            <span style={{ fontSize: "12px", color: "#2D6A4F", fontWeight: 600 }}>
-              ✅ Stats reales obtenidos de MLB Stats API
-            </span>
-            <div style={{ display: "flex", gap: "8px" }}>
-              <button onClick={() => setShowStats(!showStats)} style={{
-                background: "#142235", border: "1px solid #1e3a52", color: "#4A90D9",
-                borderRadius: "6px", padding: "8px 14px", fontSize: "12px",
-                fontWeight: 600, cursor: "pointer",
-              }}>
-                {showStats ? "Ocultar Stats" : "📊 Ver Stats Reales"}
-              </button>
-              <button onClick={handleCopy} style={{
-                background: copied ? "#2D6A4F" : "#142235",
-                border: `1px solid ${copied ? "#2D6A4F" : "#1e3a52"}`,
-                color: "#F0F4F8", borderRadius: "6px", padding: "8px 14px",
-                fontSize: "12px", fontWeight: 600, cursor: "pointer",
-              }}>
-                {copied ? "✅ Copiado" : "📋 Copiar"}
-              </button>
+      {tab === "predictor" && (
+        <>
+          <div style={{
+            display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "14px",
+            alignItems: "center", maxWidth: "680px", margin: "0 auto 20px",
+          }}>
+            <div>
+              <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "7px", textAlign: "center" }}>VISITANTE</div>
+              <select value={away} onChange={e => setAway(e.target.value)} style={selectStyle}>
+                <option value="">Seleccionar…</option>
+                {TEAMS.map(t => <option key={t}>{t}</option>)}
+              </select>
+            </div>
+            <div style={{
+              width: "40px", height: "40px", borderRadius: "50%",
+              background: "#142235", border: "1px solid #2D6A4F",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: "11px", fontWeight: 700, color: "#F4A261", flexShrink: 0,
+            }}>VS</div>
+            <div>
+              <div style={{ fontSize: "11px", color: "#F4A261", letterSpacing: "0.15em", marginBottom: "7px", textAlign: "center" }}>LOCAL</div>
+              <select value={home} onChange={e => setHome(e.target.value)} style={selectStyle}>
+                <option value="">Seleccionar…</option>
+                {TEAMS.map(t => <option key={t}>{t}</option>)}
+              </select>
             </div>
           </div>
 
-          {/* Real Stats Panel */}
-          {showStats && realStats && (
-            <div style={{
-              background: "#142235", border: "1px solid #1e3a52", borderRadius: "12px",
-              padding: "20px", marginBottom: "16px", animation: "fadeIn .3s ease"
+          {error && <p style={{ color: "#e74c3c", textAlign: "center", fontSize: "13px", marginBottom: "14px" }}>{error}</p>}
+
+          <div style={{ textAlign: "center", marginBottom: "32px" }}>
+            <button onClick={() => analyze()} disabled={loading} style={{
+              background: loading ? "#1e3a52" : "linear-gradient(135deg, #2D6A4F, #1a4a35)",
+              color: loading ? "#4a6a88" : "#F0F4F8", border: "none", borderRadius: "8px",
+              padding: "14px 36px", fontSize: "15px", fontWeight: 700,
+              cursor: loading ? "not-allowed" : "pointer", letterSpacing: "0.05em",
+              boxShadow: loading ? "none" : "0 4px 20px rgba(45,106,79,0.4)", transition: "all 0.2s",
             }}>
-              <div style={{ fontSize: "12px", color: "#F4A261", letterSpacing: "0.15em", marginBottom: "14px" }}>
-                📊 STATS REALES — TEMPORADA {new Date().getFullYear()}
+              {loading ? "Consultando MLB Stats API…" : "⚾ ANALIZAR CON DATOS REALES"}
+            </button>
+          </div>
+
+          {loading && <DiamondLoader />}
+
+          {result && !loading && (
+            <div style={{ maxWidth: "680px", margin: "0 auto", animation: "fadeIn .5s ease" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px", flexWrap: "wrap", gap: "8px" }}>
+                <span style={{ fontSize: "12px", color: "#2D6A4F", fontWeight: 600 }}>
+                  ✅ Stats reales obtenidos de MLB Stats API
+                </span>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  {realStats && (
+                    <button onClick={() => setShowStats(!showStats)} style={{
+                      background: "#142235", border: "1px solid #1e3a52", color: "#4A90D9",
+                      borderRadius: "6px", padding: "8px 14px", fontSize: "12px",
+                      fontWeight: 600, cursor: "pointer",
+                    }}>
+                      {showStats ? "Ocultar Stats" : "📊 Ver Stats Reales"}
+                    </button>
+                  )}
+                  <button onClick={handleCopy} style={{
+                    background: copied ? "#2D6A4F" : "#142235",
+                    border: `1px solid ${copied ? "#2D6A4F" : "#1e3a52"}`,
+                    color: "#F0F4F8", borderRadius: "6px", padding: "8px 14px",
+                    fontSize: "12px", fontWeight: 600, cursor: "pointer",
+                  }}>
+                    {copied ? "✅ Copiado" : "📋 Copiar"}
+                  </button>
+                </div>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
-                {[
-                  { label: `🔵 ${away} (V)`, stats: realStats.away, color: "#4A90D9" },
-                  { label: `🟠 ${home} (L)`, stats: realStats.home, color: "#F4A261" },
-                ].map(({ label, stats, color }) => (
-                  <div key={label}>
-                    <div style={{ fontSize: "12px", fontWeight: 700, color, marginBottom: "8px" }}>{label}</div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                      <StatCard label="AVG" value={stats.avg} />
-                      <StatCard label="OPS" value={stats.ops} highlight={color} />
-                      <StatCard label="OBP" value={stats.obp} />
-                      <StatCard label="ERA" value={stats.era} highlight={color} />
-                      <StatCard label="WHIP" value={stats.whip} />
-                      <StatCard label="K/9" value={stats.strikeoutsPer9} />
-                      <StatCard label="Carreras" value={stats.runs} />
-                      <StatCard label="Blown Saves" value={stats.blownSaves} />
+
+              {showStats && realStats && (
+                <div style={{
+                  background: "#142235", border: "1px solid #1e3a52", borderRadius: "12px",
+                  padding: "20px", marginBottom: "16px", animation: "fadeIn .3s ease"
+                }}>
+                  <div style={{ fontSize: "12px", color: "#F4A261", letterSpacing: "0.15em", marginBottom: "14px" }}>
+                    📊 STATS REALES — TEMPORADA {new Date().getFullYear()}
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                    {[
+                      { label: `🔵 ${away} (V)`, stats: realStats.away, color: "#4A90D9" },
+                      { label: `🟠 ${home} (L)`, stats: realStats.home, color: "#F4A261" },
+                    ].map(({ label, stats, color }) => (
+                      <div key={label}>
+                        <div style={{ fontSize: "12px", fontWeight: 700, color, marginBottom: "8px" }}>{label}</div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                          <StatCard label="AVG" value={stats.avg} />
+                          <StatCard label="OPS" value={stats.ops} highlight={color} />
+                          <StatCard label="OBP" value={stats.obp} />
+                          <StatCard label="ERA" value={stats.era} highlight={color} />
+                          <StatCard label="WHIP" value={stats.whip} />
+                          <StatCard label="K/9" value={stats.strikeoutsPer9} />
+                          <StatCard label="Carreras" value={stats.runs} />
+                          <StatCard label="Blown Saves" value={stats.blownSaves} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {realStats.h2h?.totalGames > 0 && (
+                    <div style={{ marginTop: "12px", padding: "10px", background: "#0f1e2e", borderRadius: "6px", textAlign: "center" }}>
+                      <span style={{ fontSize: "12px", color: "#7a9ab8" }}>
+                        H2H {new Date().getFullYear()}: <strong style={{ color: "#F4A261" }}>{home} {realStats.h2h.homeWins}W</strong>
+                        {" — "}
+                        <strong style={{ color: "#4A90D9" }}>{away} {realStats.h2h.awayWins}W</strong>
+                        {" "}({realStats.h2h.totalGames} juegos)
+                      </span>
                     </div>
+                  )}
+                </div>
+              )}
+
+              <div style={{ background: "#142235", border: "1px solid #1e3a52", borderRadius: "12px", padding: "20px", marginBottom: "14px" }}>
+                <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "14px" }}>
+                  PROBABILIDADES DE VICTORIA (MONEYLINE)
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px", fontSize: "13px" }}>
+                  <span style={{ color: "#4A90D9" }}>{away} <strong style={{ color: "#F0F4F8", fontSize: "18px" }}>{result.away_win_pct}%</strong></span>
+                  <span style={{ color: "#F4A261" }}>{home} <strong style={{ color: "#F0F4F8", fontSize: "18px" }}>{result.home_win_pct}%</strong></span>
+                </div>
+                <div style={{ display: "flex", gap: "4px" }}>
+                  <WinBar pct={result.away_win_pct} color="#4A90D9" />
+                  <WinBar pct={result.home_win_pct} color="#F4A261" />
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
+                <MarketCard
+                  icon="🎯" title="1ER INNING (SI/NO)"
+                  pick={result.first_inning?.scores}
+                  confidence_pct={result.first_inning?.confidence_pct}
+                  reasoning={result.first_inning?.reasoning}
+                  pickColorYes="#E63946" pickColorNo="#2D6A4F"
+                />
+                <MarketCard
+                  icon="📊" title="TOTAL CARRERAS"
+                  pick={result.total_runs?.pick}
+                  line={result.total_runs?.line}
+                  confidence_pct={result.total_runs?.confidence_pct}
+                  reasoning={result.total_runs?.reasoning}
+                  pickColorYes="#F4A261" pickColorNo="#4A90D9"
+                />
+                <MarketCard
+                  icon="🟠" title={`SOLO LOCAL — ${home}`}
+                  pick={result.home_team_runs?.pick}
+                  line={result.home_team_runs?.line}
+                  confidence_pct={result.home_team_runs?.confidence_pct}
+                  reasoning={result.home_team_runs?.reasoning}
+                  pickColorYes="#F4A261" pickColorNo="#4A90D9"
+                />
+                <MarketCard
+                  icon="🔵" title={`SOLO VISITANTE — ${away}`}
+                  pick={result.away_team_runs?.pick}
+                  line={result.away_team_runs?.line}
+                  confidence_pct={result.away_team_runs?.confidence_pct}
+                  reasoning={result.away_team_runs?.reasoning}
+                  pickColorYes="#F4A261" pickColorNo="#4A90D9"
+                />
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px", marginBottom: "14px" }}>
+                {[
+                  { icon: "⚾", label: "PITCHING", value: result.pitching_edge },
+                  { icon: "⚠️", label: "BULLPEN RISK", value: result.bullpen_risk },
+                  { icon: "🏏", label: "BATEO", value: result.batting_edge },
+                ].map(item => (
+                  <div key={item.label} style={{ background: "#142235", border: "1px solid #1e3a52", borderRadius: "10px", padding: "14px" }}>
+                    <div style={{ fontSize: "10px", color: "#4A90D9", letterSpacing: "0.12em", marginBottom: "6px" }}>
+                      {item.icon} {item.label}
+                    </div>
+                    <p style={{ fontSize: "12px", color: "#c5d8ea", margin: 0, lineHeight: 1.5 }}>{item.value}</p>
                   </div>
                 ))}
               </div>
-              {realStats.h2h.totalGames > 0 && (
-                <div style={{ marginTop: "12px", padding: "10px", background: "#0f1e2e", borderRadius: "6px", textAlign: "center" }}>
-                  <span style={{ fontSize: "12px", color: "#7a9ab8" }}>
-                    H2H {new Date().getFullYear()}: <strong style={{ color: "#F4A261" }}>{home} {realStats.h2h.homeWins}W</strong>
-                    {" — "}
-                    <strong style={{ color: "#4A90D9" }}>{away} {realStats.h2h.awayWins}W</strong>
-                    {" "}({realStats.h2h.totalGames} juegos)
-                  </span>
+
+              <div style={{ background: "linear-gradient(135deg,#142235,#0f1e2e)", border: "1px solid #1e3a52", borderRadius: "12px", padding: "20px" }}>
+                <div style={{ marginBottom: "14px" }}>
+                  <div style={{ fontSize: "11px", color: "#F4A261", letterSpacing: "0.15em", marginBottom: "6px" }}>⚔️ HEAD TO HEAD</div>
+                  <p style={{ margin: 0, fontSize: "13px", color: "#c5d8ea", lineHeight: 1.5 }}>{result.h2h_note}</p>
                 </div>
-              )}
+                <div style={{ borderTop: "1px solid #1e3a52", paddingTop: "14px" }}>
+                  <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "6px" }}>🎙️ ANÁLISIS FINAL</div>
+                  <p style={{ margin: 0, fontSize: "13px", color: "#c5d8ea", lineHeight: 1.6, fontStyle: "italic" }}>"{result.analyst_take}"</p>
+                </div>
+              </div>
+
+              <p style={{ textAlign: "center", fontSize: "11px", color: "#3a5a78", marginTop: "14px" }}>
+                Stats obtenidos de MLB Stats API oficial · Análisis generado por IA · Solo uso estadístico y de referencia.
+              </p>
             </div>
           )}
+        </>
+      )}
 
-          {/* Win Probability */}
-          <div style={{ background: "#142235", border: "1px solid #1e3a52", borderRadius: "12px", padding: "20px", marginBottom: "14px" }}>
-            <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "14px" }}>
-              PROBABILIDADES DE VICTORIA (MONEYLINE)
+      {tab === "today" && (
+        <div style={{ maxWidth: "680px", margin: "0 auto", animation: "fadeIn .4s ease" }}>
+
+          {notifPermission !== "granted" && notifPermission !== "unsupported" && (
+            <div style={{
+              background: "#142235", border: "1px solid #2D6A4F", borderRadius: "10px",
+              padding: "14px 16px", marginBottom: "16px", display: "flex",
+              justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px"
+            }}>
+              <span style={{ fontSize: "12px", color: "#c5d8ea" }}>
+                🔔 Activa notificaciones para avisos 15 min antes de cada partido
+              </span>
+              <button onClick={handleEnableNotifications} style={{
+                background: "#2D6A4F", border: "none", color: "#fff", borderRadius: "6px",
+                padding: "8px 14px", fontSize: "12px", fontWeight: 700, cursor: "pointer",
+              }}>
+                Activar
+              </button>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px", fontSize: "13px" }}>
-              <span style={{ color: "#4A90D9" }}>{away} <strong style={{ color: "#F0F4F8", fontSize: "18px" }}>{result.away_win_pct}%</strong></span>
-              <span style={{ color: "#F4A261" }}>{home} <strong style={{ color: "#F0F4F8", fontSize: "18px" }}>{result.home_win_pct}%</strong></span>
-            </div>
-            <div style={{ display: "flex", gap: "4px" }}>
-              <WinBar pct={result.away_win_pct} color="#4A90D9" />
-              <WinBar pct={result.home_win_pct} color="#F4A261" />
-            </div>
+          )}
+          {notifPermission === "denied" && (
+            <p style={{ fontSize: "11px", color: "#c0392b", textAlign: "center", marginBottom: "16px" }}>
+              Notificaciones bloqueadas. Actívalas en la configuración del navegador.
+            </p>
+          )}
+          {notifPermission === "granted" && (
+            <p style={{ fontSize: "11px", color: "#2D6A4F", textAlign: "center", marginBottom: "16px" }}>
+              ✅ Notificaciones activadas — recibirás avisos 15 min antes (mientras la app esté abierta)
+            </p>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+            <h2 style={{ fontSize: "16px", margin: 0, color: "#F0F4F8" }}>
+              📅 Partidos de Hoy — {new Date().toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "long" })}
+            </h2>
+            <button onClick={loadTodayGames} disabled={loadingGames} style={{
+              background: "#142235", border: "1px solid #1e3a52", color: "#4A90D9",
+              borderRadius: "6px", padding: "6px 12px", fontSize: "11px", cursor: "pointer",
+            }}>
+              {loadingGames ? "..." : "🔄"}
+            </button>
           </div>
 
-          {/* Markets Grid */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
-            <MarketCard
-              icon="🎯" title="1ER INNING (SI/NO)"
-              pick={result.first_inning?.scores}
-              confidence_pct={result.first_inning?.confidence_pct}
-              reasoning={result.first_inning?.reasoning}
-              pickColorYes="#E63946" pickColorNo="#2D6A4F"
-            />
-            <MarketCard
-              icon="📊" title="TOTAL CARRERAS"
-              pick={result.total_runs?.pick}
-              line={result.total_runs?.line}
-              confidence_pct={result.total_runs?.confidence_pct}
-              reasoning={result.total_runs?.reasoning}
-              pickColorYes="#F4A261" pickColorNo="#4A90D9"
-            />
-            <MarketCard
-              icon="🟠" title={`SOLO LOCAL — ${home}`}
-              pick={result.home_team_runs?.pick}
-              line={result.home_team_runs?.line}
-              confidence_pct={result.home_team_runs?.confidence_pct}
-              reasoning={result.home_team_runs?.reasoning}
-              pickColorYes="#F4A261" pickColorNo="#4A90D9"
-            />
-            <MarketCard
-              icon="🔵" title={`SOLO VISITANTE — ${away}`}
-              pick={result.away_team_runs?.pick}
-              line={result.away_team_runs?.line}
-              confidence_pct={result.away_team_runs?.confidence_pct}
-              reasoning={result.away_team_runs?.reasoning}
-              pickColorYes="#F4A261" pickColorNo="#4A90D9"
-            />
-          </div>
+          {loadingGames && <DiamondLoader />}
+          {gamesError && <p style={{ color: "#e74c3c", textAlign: "center", fontSize: "13px" }}>{gamesError}</p>}
 
-          {/* Edges */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px", marginBottom: "14px" }}>
-            {[
-              { icon: "⚾", label: "PITCHING", value: result.pitching_edge },
-              { icon: "⚠️", label: "BULLPEN RISK", value: result.bullpen_risk },
-              { icon: "🏏", label: "BATEO", value: result.batting_edge },
-            ].map(item => (
-              <div key={item.label} style={{ background: "#142235", border: "1px solid #1e3a52", borderRadius: "10px", padding: "14px" }}>
-                <div style={{ fontSize: "10px", color: "#4A90D9", letterSpacing: "0.12em", marginBottom: "6px" }}>
-                  {item.icon} {item.label}
+          {!loadingGames && !gamesError && todayGames.length === 0 && (
+            <p style={{ textAlign: "center", color: "#7a9ab8", fontSize: "13px" }}>
+              No hay partidos programados para hoy.
+            </p>
+          )}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            {todayGames.map(g => (
+              <div key={g.gamePk} style={{
+                background: "#142235", border: "1px solid #1e3a52", borderRadius: "12px",
+                padding: "16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", flexWrap: "wrap"
+              }}>
+                <div style={{ flex: 1, minWidth: "200px" }}>
+                  <div style={{ fontSize: "13px", color: "#F0F4F8", fontWeight: 600, marginBottom: "4px" }}>
+                    {g.away.name} <span style={{ color: "#4a6a88" }}>@</span> {g.home.name}
+                  </div>
+                  <div style={{ fontSize: "11px", color: "#7a9ab8" }}>
+                    {g.status === "Final"
+                      ? `Final: ${g.away.score} - ${g.home.score}`
+                      : `${formatGameTime(g.gameDate)} · ${g.status}`}
+                    {g.venue && ` · ${g.venue}`}
+                  </div>
                 </div>
-                <p style={{ fontSize: "12px", color: "#c5d8ea", margin: 0, lineHeight: 1.5 }}>{item.value}</p>
+                <button onClick={() => analyze(g.home.name, g.away.name)} style={{
+                  background: "linear-gradient(135deg, #2D6A4F, #1a4a35)", border: "none",
+                  color: "#fff", borderRadius: "6px", padding: "8px 16px", fontSize: "11px",
+                  fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap",
+                }}>
+                  ⚾ Analizar
+                </button>
               </div>
             ))}
           </div>
+        </div>
+      )}
 
-          {/* H2H + Final Take */}
-          <div style={{ background: "linear-gradient(135deg,#142235,#0f1e2e)", border: "1px solid #1e3a52", borderRadius: "12px", padding: "20px" }}>
-            <div style={{ marginBottom: "14px" }}>
-              <div style={{ fontSize: "11px", color: "#F4A261", letterSpacing: "0.15em", marginBottom: "6px" }}>⚔️ HEAD TO HEAD</div>
-              <p style={{ margin: 0, fontSize: "13px", color: "#c5d8ea", lineHeight: 1.5 }}>{result.h2h_note}</p>
-            </div>
-            <div style={{ borderTop: "1px solid #1e3a52", paddingTop: "14px" }}>
-              <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "6px" }}>🎙️ ANÁLISIS FINAL</div>
-              <p style={{ margin: 0, fontSize: "13px", color: "#c5d8ea", lineHeight: 1.6, fontStyle: "italic" }}>"{result.analyst_take}"</p>
-            </div>
+      {tab === "history" && (
+        <div style={{ maxWidth: "680px", margin: "0 auto", animation: "fadeIn .4s ease" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+            <h2 style={{ fontSize: "16px", margin: 0, color: "#F0F4F8" }}>🕓 Historial de Predicciones</h2>
+            {history.length > 0 && (
+              <button onClick={handleClearHistory} style={{
+                background: "transparent", border: "1px solid #c0392b", color: "#c0392b",
+                borderRadius: "6px", padding: "6px 12px", fontSize: "11px", cursor: "pointer",
+              }}>
+                🗑️ Borrar todo
+              </button>
+            )}
           </div>
 
-          <p style={{ textAlign: "center", fontSize: "11px", color: "#3a5a78", marginTop: "14px" }}>
-            Stats obtenidos de MLB Stats API oficial · Análisis generado por IA · Solo uso estadístico y de referencia.
+          <p style={{ fontSize: "11px", color: "#3a5a78", marginBottom: "16px" }}>
+            Guardado solo en este dispositivo · Máximo {MAX_HISTORY} predicciones
           </p>
+
+          {history.length === 0 && (
+            <p style={{ textAlign: "center", color: "#7a9ab8", fontSize: "13px", padding: "40px 0" }}>
+              Aún no has hecho ninguna predicción.
+            </p>
+          )}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            {history.map(entry => (
+              <div key={entry.id} onClick={() => loadFromHistory(entry)} style={{
+                background: "#142235", border: "1px solid #1e3a52", borderRadius: "12px",
+                padding: "16px", cursor: "pointer", transition: "all 0.2s",
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                  <span style={{ fontSize: "13px", fontWeight: 600, color: "#F0F4F8" }}>
+                    {entry.away} <span style={{ color: "#4a6a88" }}>@</span> {entry.home}
+                  </span>
+                  <span style={{ fontSize: "10px", color: "#4a6a88" }}>
+                    {new Date(entry.date).toLocaleDateString("es-ES", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: "12px", fontSize: "11px", color: "#7a9ab8" }}>
+                  <span>ML: <strong style={{ color: "#F4A261" }}>{entry.analysis?.home_win_pct}%</strong> / <strong style={{ color: "#4A90D9" }}>{entry.analysis?.away_win_pct}%</strong></span>
+                  <span>1er Inn: <strong style={{ color: entry.analysis?.first_inning?.scores === "SI" ? "#E63946" : "#2D6A4F" }}>{entry.analysis?.first_inning?.scores}</strong></span>
+                  <span>Total: <strong style={{ color: "#F0F4F8" }}>{entry.analysis?.total_runs?.pick}</strong></span>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
