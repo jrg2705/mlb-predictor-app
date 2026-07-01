@@ -336,6 +336,7 @@ home_win_pct + away_win_pct = 100 exactamente.`;
         awayPitcher,
         lineup,
         gameDate: gameInfo?.gameDate || null,
+        gamePk: gameInfo?.gamePk || null,
       },
     });
   } catch (err) {
