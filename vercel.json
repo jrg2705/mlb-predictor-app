@@ -1,8 +1,17 @@
 {
-  "rewrites": [
-    {
-      "source": "/api/analyze",
-      "destination": "/api/analyze.js"
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "framework": "vite",
+  "functions": {
+    "api/analyze.js": {
+      "maxDuration": 30
+    },
+    "api/game-result.js": {
+      "maxDuration": 20
     }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/$1" },
+    { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
