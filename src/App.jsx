@@ -63,7 +63,8 @@ function confidenceBand(pct) {
   if (pct >= 75) return "75-100";
   if (pct >= 65) return "65-74";
   if (pct >= 58) return "58-64";
-  return "below-58";
+  if (pct >= 55) return "55-57";
+  return "below-55";
 }
 
 function recordOutcome(entry, winner) {
@@ -918,7 +919,7 @@ ${result.away_team_runs?.reasoning}
                   PRECISIÓN POR NIVEL DE CONFIANZA
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                  {["75-100", "65-74", "58-64", "below-58"].map(band => {
+                  {["75-100", "65-74", "58-64", "55-57", "below-55"].map(band => {
                     const bandData = trackRecord.byBand[band];
                     if (!bandData || bandData.total === 0) return null;
                     const pct = Math.round((bandData.correct / bandData.total) * 100);
@@ -926,7 +927,8 @@ ${result.away_team_runs?.reasoning}
                       "75-100": "Confianza Alta (75%+)",
                       "65-74": "Confianza Media-Alta (65-74%)",
                       "58-64": "Confianza Media (58-64%)",
-                      "below-58": "Confianza Baja (<58%)",
+                      "55-57": "Confianza Baja-Media (55-57%)",
+                      "below-55": "Confianza Baja (<55%)",
                     };
                     return (
                       <div key={band}>
