@@ -45,6 +45,50 @@ function clearHistory() {
   localStorage.removeItem(HISTORY_KEY);
 }
 
+// ---------- Track Record: independent accuracy tracking ----------
+// This persists separately from history, so clearing history (30-item cap)
+// never affects the long-term accuracy record.
+const TRACK_RECORD_KEY = "mlb_predictor_track_record";
+
+function loadTrackRecord() {
+  try {
+    const raw = localStorage.getItem(TRACK_RECORD_KEY);
+    return raw ? JSON.parse(raw) : { total: 0, correct: 0, byBand: {} };
+  } catch {
+    return { total: 0, correct: 0, byBand: {} };
+  }
+}
+
+function confidenceBand(pct) {
+  if (pct >= 75) return "75-100";
+  if (pct >= 65) return "65-74";
+  if (pct >= 58) return "58-64";
+  return "below-58";
+}
+
+function recordOutcome(entry, winner) {
+  // winner: "home" | "away"
+  const record = loadTrackRecord();
+  const favoredPct = Math.max(entry.analysis.home_win_pct, entry.analysis.away_win_pct);
+  const favoredSide = entry.analysis.home_win_pct >= entry.analysis.away_win_pct ? "home" : "away";
+  const band = confidenceBand(favoredPct);
+  const wasCorrect = favoredSide === winner;
+
+  record.total += 1;
+  if (wasCorrect) record.correct += 1;
+
+  if (!record.byBand[band]) record.byBand[band] = { total: 0, correct: 0 };
+  record.byBand[band].total += 1;
+  if (wasCorrect) record.byBand[band].correct += 1;
+
+  localStorage.setItem(TRACK_RECORD_KEY, JSON.stringify(record));
+  return record;
+}
+
+function resetTrackRecord() {
+  localStorage.removeItem(TRACK_RECORD_KEY);
+}
+
 async function requestNotificationPermission() {
   if (!("Notification" in window)) return "unsupported";
   if (Notification.permission === "granted") return "granted";
@@ -177,14 +221,74 @@ export default function MLBPredictor() {
   const [gamesError, setGamesError] = useState("");
 
   const [history, setHistory] = useState([]);
+  const [trackRecord, setTrackRecord] = useState({ total: 0, correct: 0, byBand: {} });
+  const [verifying, setVerifying] = useState(false);
 
   const [notifPermission, setNotifPermission] = useState(
     typeof Notification !== "undefined" ? Notification.permission : "unsupported"
   );
 
   useEffect(() => {
-    setHistory(loadHistory());
+    const loadedHistory = loadHistory();
+    setHistory(loadedHistory);
+    setTrackRecord(loadTrackRecord());
+    verifyPendingGames(loadedHistory);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Checks any past, unverified games against real MLB results,
+  // updates the independent track record, and marks history entries as verified.
+  const verifyPendingGames = async (currentHistory) => {
+    const now = new Date();
+    const pending = currentHistory.filter(e => {
+      if (e.verified || !e.gamePk) return false;
+      const entryDate = new Date(e.date);
+      // Only check games from a previous day (game should be over by now)
+      return entryDate.toDateString() !== now.toDateString();
+    });
+
+    if (pending.length === 0) return;
+
+    setVerifying(true);
+    try {
+      const res = await fetch("/api/game-result", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ gamePks: pending.map(e => e.gamePk) }),
+      });
+      const data = await res.json();
+      const resultsByPk = {};
+      (data.results || []).forEach(r => { resultsByPk[r.gamePk] = r; });
+
+      let updatedHistory = loadHistory();
+      let record = loadTrackRecord();
+
+      pending.forEach(entry => {
+        const gameResult = resultsByPk[entry.gamePk];
+        if (gameResult && gameResult.final && gameResult.winner !== "tie") {
+          record = recordOutcome(entry, gameResult.winner);
+          updatedHistory = updatedHistory.map(e =>
+            e.id === entry.id
+              ? { ...e, verified: true, actualWinner: gameResult.winner, actualScore: `${gameResult.awayRuns}-${gameResult.homeRuns}` }
+              : e
+          );
+        }
+      });
+
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(updatedHistory));
+      setHistory(updatedHistory);
+      setTrackRecord(record);
+    } catch {
+      // Silent fail — verification will retry next time the app loads
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const handleResetTrackRecord = () => {
+    resetTrackRecord();
+    setTrackRecord({ total: 0, correct: 0, byBand: {} });
+  };
 
   const analyze = async (homeTeam = home, awayTeam = away) => {
     if (!homeTeam || !awayTeam || homeTeam === awayTeam) {
@@ -219,6 +323,8 @@ export default function MLBPredictor() {
         home: homeTeam,
         away: awayTeam,
         analysis: data.analysis,
+        gamePk: data.gameContext?.gamePk || null,
+        verified: false,
       };
       setHistory(saveToHistory(entry));
     } catch (e) {
@@ -363,6 +469,7 @@ ${result.away_team_runs?.reasoning}
         <TabButton active={tab === "predictor"} onClick={() => setTab("predictor")}>⚾ Predictor</TabButton>
         <TabButton active={tab === "today"} onClick={() => setTab("today")}>📅 Partidos de Hoy</TabButton>
         <TabButton active={tab === "history"} onClick={() => setTab("history")}>🕓 Historial ({history.length})</TabButton>
+        <TabButton active={tab === "track"} onClick={() => setTab("track")}>🎯 Track Record</TabButton>
       </div>
 
       {tab === "predictor" && (
@@ -739,14 +846,107 @@ ${result.away_team_runs?.reasoning}
                     {new Date(entry.date).toLocaleDateString("es-ES", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
                   </span>
                 </div>
-                <div style={{ display: "flex", gap: "12px", fontSize: "11px", color: "#7a9ab8" }}>
+                <div style={{ display: "flex", gap: "12px", fontSize: "11px", color: "#7a9ab8", flexWrap: "wrap" }}>
                   <span>ML: <strong style={{ color: "#F4A261" }}>{entry.analysis?.home_win_pct}%</strong> / <strong style={{ color: "#4A90D9" }}>{entry.analysis?.away_win_pct}%</strong></span>
                   <span>1er Inn: <strong style={{ color: entry.analysis?.first_inning?.scores === "SI" ? "#E63946" : "#2D6A4F" }}>{entry.analysis?.first_inning?.scores}</strong></span>
                   <span>Total: <strong style={{ color: "#F0F4F8" }}>{entry.analysis?.total_runs?.pick}</strong></span>
+                  {entry.verified && (
+                    (() => {
+                      const favoredSide = entry.analysis.home_win_pct >= entry.analysis.away_win_pct ? "home" : "away";
+                      const correct = favoredSide === entry.actualWinner;
+                      return (
+                        <span style={{ color: correct ? "#2D6A4F" : "#c0392b", fontWeight: 700 }}>
+                          {correct ? "✅ Acertó" : "❌ Falló"} ({entry.actualScore})
+                        </span>
+                      );
+                    })()
+                  )}
                 </div>
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {tab === "track" && (
+        <div style={{ maxWidth: "680px", margin: "0 auto", animation: "fadeIn .4s ease" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+            <h2 style={{ fontSize: "16px", margin: 0, color: "#F0F4F8" }}>🎯 Track Record del Modelo</h2>
+            {trackRecord.total > 0 && (
+              <button onClick={handleResetTrackRecord} style={{
+                background: "transparent", border: "1px solid #c0392b", color: "#c0392b",
+                borderRadius: "6px", padding: "6px 12px", fontSize: "11px", cursor: "pointer",
+              }}>
+                🗑️ Reiniciar
+              </button>
+            )}
+          </div>
+          <p style={{ fontSize: "11px", color: "#3a5a78", marginBottom: "16px" }}>
+            Independiente del historial · No se borra al limpiar el historial · Verificado automáticamente con MLB Stats API
+          </p>
+
+          {verifying && (
+            <p style={{ fontSize: "12px", color: "#4A90D9", textAlign: "center", marginBottom: "16px" }}>
+              🔄 Verificando resultados pendientes…
+            </p>
+          )}
+
+          {trackRecord.total === 0 ? (
+            <p style={{ textAlign: "center", color: "#7a9ab8", fontSize: "13px", padding: "40px 0" }}>
+              Aún no hay partidos verificados. Los resultados se confirman automáticamente al abrir la app,
+              un día después de haber hecho el análisis.
+            </p>
+          ) : (
+            <>
+              <div style={{
+                background: "linear-gradient(135deg, #142235, #16314a)", border: "1px solid #2D6A4F",
+                borderRadius: "12px", padding: "24px", textAlign: "center", marginBottom: "16px"
+              }}>
+                <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "8px" }}>
+                  PRECISIÓN GENERAL (EQUIPO FAVORITO)
+                </div>
+                <div style={{ fontSize: "42px", fontWeight: 900, color: "#F4A261" }}>
+                  {Math.round((trackRecord.correct / trackRecord.total) * 100)}%
+                </div>
+                <div style={{ fontSize: "12px", color: "#7a9ab8", marginTop: "4px" }}>
+                  {trackRecord.correct} de {trackRecord.total} predicciones acertadas
+                </div>
+              </div>
+
+              <div style={{ background: "#142235", border: "1px solid #1e3a52", borderRadius: "12px", padding: "20px" }}>
+                <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "14px" }}>
+                  PRECISIÓN POR NIVEL DE CONFIANZA
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                  {["75-100", "65-74", "58-64", "below-58"].map(band => {
+                    const bandData = trackRecord.byBand[band];
+                    if (!bandData || bandData.total === 0) return null;
+                    const pct = Math.round((bandData.correct / bandData.total) * 100);
+                    const labels = {
+                      "75-100": "Confianza Alta (75%+)",
+                      "65-74": "Confianza Media-Alta (65-74%)",
+                      "58-64": "Confianza Media (58-64%)",
+                      "below-58": "Confianza Baja (<58%)",
+                    };
+                    return (
+                      <div key={band}>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", marginBottom: "4px" }}>
+                          <span style={{ color: "#c5d8ea" }}>{labels[band]}</span>
+                          <span style={{ color: "#F0F4F8", fontWeight: 700 }}>{pct}% ({bandData.correct}/{bandData.total})</span>
+                        </div>
+                        <WinBar pct={pct} color={pct >= 55 ? "#2D6A4F" : "#c0392b"} />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <p style={{ textAlign: "center", fontSize: "11px", color: "#3a5a78", marginTop: "14px" }}>
+                Referencia: incluso los mejores modelos profesionales de MLB rondan 60-65% de precisión sostenida.
+                Muestras pequeñas (menos de 30-50 partidos) no son representativas.
+              </p>
+            </>
+          )}
         </div>
       )}
     </div>
