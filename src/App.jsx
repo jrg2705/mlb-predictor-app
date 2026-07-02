@@ -223,6 +223,8 @@ export default function MLBPredictor() {
 
   const [history, setHistory] = useState([]);
   const [trackRecord, setTrackRecord] = useState({ total: 0, correct: 0, byBand: {} });
+  const [picksCount, setPicksCount] = useState(1);
+  const [generatedPicks, setGeneratedPicks] = useState(null);
   const [verifying, setVerifying] = useState(false);
 
   const [notifPermission, setNotifPermission] = useState(
@@ -441,6 +443,44 @@ ${result.away_team_runs?.reasoning}
     }
   };
 
+  // ---------- Top Picks del Día ----------
+  // Games analyzed today, one entry per matchup (most recent analysis wins if duplicated)
+  const todayAnalyzed = (() => {
+    const todayStr = new Date().toDateString();
+    const seen = new Map();
+    history.forEach(entry => {
+      if (new Date(entry.date).toDateString() !== todayStr) return;
+      const key = [entry.home, entry.away].sort().join("|");
+      if (!seen.has(key)) seen.set(key, entry); // history is newest-first, so first hit is latest
+    });
+    return Array.from(seen.values());
+  })();
+
+  // Number of games scheduled today (for the selector's max value)
+  const scheduledTodayCount = todayGames.length || todayAnalyzed.length;
+
+  // Build the picks list: one favored team per analyzed matchup, chosen randomly
+  const buildTopPicks = (count) => {
+    const withFavorite = todayAnalyzed.map(entry => {
+      const homePct = entry.analysis?.home_win_pct ?? 0;
+      const awayPct = entry.analysis?.away_win_pct ?? 0;
+      const favoredTeam = homePct >= awayPct ? entry.home : entry.away;
+      const favoredPct = Math.max(homePct, awayPct);
+      return { entry, favoredTeam, favoredPct };
+    });
+    // Shuffle (Fisher-Yates) then take the requested count — random selection each time
+    const shuffled = [...withFavorite];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled.slice(0, count);
+  };
+
+  const handleGeneratePicks = () => {
+    setGeneratedPicks(buildTopPicks(picksCount));
+  };
+
   return (
     <div style={{
       minHeight: "100vh", background: "#0D1B2A", color: "#F0F4F8",
@@ -471,6 +511,7 @@ ${result.away_team_runs?.reasoning}
         <TabButton active={tab === "today"} onClick={() => setTab("today")}>📅 Partidos de Hoy</TabButton>
         <TabButton active={tab === "history"} onClick={() => setTab("history")}>🕓 Historial ({history.length})</TabButton>
         <TabButton active={tab === "track"} onClick={() => setTab("track")}>🎯 Track Record</TabButton>
+        <TabButton active={tab === "picks"} onClick={() => setTab("picks")}>🍀 Top Picks</TabButton>
       </div>
 
       {tab === "predictor" && (
@@ -949,6 +990,88 @@ ${result.away_team_runs?.reasoning}
               </p>
             </>
           )}
+        </div>
+      )}
+
+      {tab === "picks" && (
+        <div style={{ maxWidth: "680px", margin: "0 auto", animation: "fadeIn .4s ease" }}>
+          <h2 style={{ fontSize: "16px", margin: "0 0 6px", color: "#F0F4F8" }}>🍀 Top Picks del Día</h2>
+          <p style={{ fontSize: "11px", color: "#3a5a78", marginBottom: "20px" }}>
+            Elige cuántos partidos quieres y la app selecciona al azar entre los que ya analizaste hoy,
+            mostrando el equipo favorito de cada uno.
+          </p>
+
+          {todayAnalyzed.length === 0 ? (
+            <p style={{ textAlign: "center", color: "#7a9ab8", fontSize: "13px", padding: "40px 0" }}>
+              Aún no has analizado ningún partido hoy. Ve a "Partidos de Hoy" y analiza algunos primero.
+            </p>
+          ) : (
+            <>
+              <div style={{
+                background: "#142235", border: "1px solid #1e3a52", borderRadius: "12px",
+                padding: "20px", marginBottom: "16px"
+              }}>
+                <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "10px" }}>
+                  ¿CUÁNTOS PARTIDOS?
+                </div>
+                <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+                  <select
+                    value={picksCount}
+                    onChange={e => setPicksCount(Number(e.target.value))}
+                    style={{
+                      background: "#0f1e2e", border: "1px solid #1e3a52", color: "#F0F4F8",
+                      borderRadius: "8px", padding: "10px 14px", fontSize: "14px", cursor: "pointer", outline: "none",
+                    }}
+                  >
+                    {Array.from({ length: Math.max(1, Math.min(15, scheduledTodayCount || 15)) }, (_, i) => i + 1).map(n => (
+                      <option key={n} value={n}>{n} {n === 1 ? "partido" : "partidos"}</option>
+                    ))}
+                  </select>
+                  <button onClick={handleGeneratePicks} style={{
+                    background: "linear-gradient(135deg, #2D6A4F, #1a4a35)", border: "none",
+                    color: "#fff", borderRadius: "8px", padding: "10px 20px", fontSize: "13px",
+                    fontWeight: 700, cursor: "pointer",
+                  }}>
+                    🍀 Generar Picks
+                  </button>
+                </div>
+                <p style={{ fontSize: "11px", color: "#4a6a88", marginTop: "10px", marginBottom: 0 }}>
+                  {todayAnalyzed.length} {todayAnalyzed.length === 1 ? "partido analizado" : "partidos analizados"} hoy disponibles
+                  {scheduledTodayCount > todayAnalyzed.length && ` · ${scheduledTodayCount} programados en total`}
+                </p>
+              </div>
+
+              {generatedPicks && generatedPicks.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "10px", animation: "fadeIn .4s ease" }}>
+                  {generatedPicks.map(({ entry, favoredTeam, favoredPct }, idx) => (
+                    <div key={entry.id} style={{
+                      background: "linear-gradient(135deg, #142235, #16314a)", border: "1px solid #2D6A4F",
+                      borderRadius: "12px", padding: "16px", display: "flex", alignItems: "center", gap: "14px"
+                    }}>
+                      <div style={{
+                        width: "28px", height: "28px", borderRadius: "50%", background: "#2D6A4F",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: "12px", fontWeight: 700, color: "#fff", flexShrink: 0,
+                      }}>{idx + 1}</div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: "10px", color: "#7a9ab8", marginBottom: "2px" }}>
+                          {entry.away} @ {entry.home}
+                        </div>
+                        <div style={{ fontSize: "15px", fontWeight: 700, color: "#F4A261" }}>
+                          🍀 {favoredTeam}
+                        </div>
+                      </div>
+                      <ConfidenceBadge pct={favoredPct} />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          <p style={{ textAlign: "center", fontSize: "11px", color: "#3a5a78", marginTop: "16px" }}>
+            Selección aleatoria entre partidos ya analizados · Basado en el equipo favorecido de cada análisis con datos reales de MLB.
+          </p>
         </div>
       )}
     </div>
