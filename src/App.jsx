@@ -387,11 +387,14 @@ FUENTE: MLB Stats API ${new Date().getFullYear()} + Groq AI
 
 PROBABILIDADES: ${away} ${result.away_win_pct}% | ${home} ${result.home_win_pct}%
 
-[1ER INNING SI/NO]
-¿Anotan?: ${result.first_inning?.scores} (Confianza: ${result.first_inning?.confidence_pct}%)
+${result.best_method ? `🏆 MEJOR MÉTODO: ${result.best_method.pick_summary} (${result.best_method.confidence_pct}%)
+${result.best_method.reasoning}
+` : ""}
+[1ER INNING SI/NO — ¿anota alguien?]
+${result.first_inning?.scores} (Confianza: ${result.first_inning?.confidence_pct}%)
 ${result.first_inning?.reasoning}
 
-[TOTAL CARRERAS]
+[TOTAL CARRERAS COMBINADO]
 Línea ${result.total_runs?.line} → ${result.total_runs?.pick} (${result.total_runs?.confidence_pct}%)
 ${result.total_runs?.reasoning}
 
@@ -403,6 +406,23 @@ ${result.home_team_runs?.reasoning}
 Línea ${result.away_team_runs?.line} → ${result.away_team_runs?.pick} (${result.away_team_runs?.confidence_pct}%)
 ${result.away_team_runs?.reasoning}
 
+${result.first_five_innings ? `[FIRST 5 INNINGS]
+Gana: ${result.first_five_innings.winner === "home" ? home : away} (${result.first_five_innings.confidence_pct}%)
+${result.first_five_innings.reasoning}
+` : ""}
+${result.run_line ? `[RUN LINE ${result.run_line.spread}]
+${result.run_line.favored_team === "home" ? home : away} — ${result.run_line.covers === "SI" ? "CUBRE" : "NO CUBRE"} (${result.run_line.confidence_pct}%)
+${result.run_line.reasoning}
+` : ""}
+${result.strikeouts_home ? `[PONCHES — ${home}]
+Línea ${result.strikeouts_home.line} → ${result.strikeouts_home.pick} (${result.strikeouts_home.confidence_pct}%)
+` : ""}
+${result.strikeouts_away ? `[PONCHES — ${away}]
+Línea ${result.strikeouts_away.line} → ${result.strikeouts_away.pick} (${result.strikeouts_away.confidence_pct}%)
+` : ""}
+${result.hce_total ? `[CARRERAS+HITS+ERRORES]
+Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total.confidence_pct}%)
+` : ""}
 [PITCHING]: ${result.pitching_edge}
 [BULLPEN]: ${result.bullpen_risk}
 [BATEO]: ${result.batting_edge}
@@ -459,17 +479,29 @@ ${result.away_team_runs?.reasoning}
   // Number of games scheduled today (for the selector's max value)
   const scheduledTodayCount = todayGames.length || todayAnalyzed.length;
 
-  // Build the picks list: one favored team per analyzed matchup, chosen randomly
+  // Build the picks list: uses the AI's best_method per matchup (could be JC, H, K,
+  // Solo, SI_NO, HCE, Linea, or RL) — not always the full-game winner.
+  const METHOD_LABELS = {
+    JC: "Juego Completo", H: "First 5 Innings", K: "Ponches",
+    Solo: "Carreras Individuales", SI_NO: "1er Inning SI/NO",
+    HCE: "Carreras+Hits+Errores", Linea: "Total Carreras", RL: "Run Line",
+  };
+
   const buildTopPicks = (count) => {
-    const withFavorite = todayAnalyzed.map(entry => {
-      const homePct = entry.analysis?.home_win_pct ?? 0;
-      const awayPct = entry.analysis?.away_win_pct ?? 0;
-      const favoredTeam = homePct >= awayPct ? entry.home : entry.away;
-      const favoredPct = Math.max(homePct, awayPct);
-      return { entry, favoredTeam, favoredPct };
-    });
+    const withMethod = todayAnalyzed
+      .filter(entry => entry.analysis?.best_method) // only entries with the new field
+      .map(entry => {
+        const bm = entry.analysis.best_method;
+        return {
+          entry,
+          market: bm.market,
+          marketLabel: METHOD_LABELS[bm.market] || bm.market,
+          pickSummary: bm.pick_summary,
+          confidence: bm.confidence_pct,
+        };
+      });
     // Shuffle (Fisher-Yates) then take the requested count — random selection each time
-    const shuffled = [...withFavorite];
+    const shuffled = [...withMethod];
     for (let i = shuffled.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
@@ -699,6 +731,32 @@ ${result.away_team_runs?.reasoning}
                 </div>
               </div>
 
+              {result.best_method && (
+                <div style={{
+                  background: "linear-gradient(135deg, #2D6A4F, #1a4a35)", border: "1px solid #4ade80",
+                  borderRadius: "12px", padding: "20px", marginBottom: "14px"
+                }}>
+                  <div style={{ fontSize: "11px", color: "#c6f6d5", letterSpacing: "0.15em", marginBottom: "8px" }}>
+                    🏆 MEJOR MÉTODO PARA ESTE PARTIDO
+                  </div>
+                  <div style={{ fontSize: "20px", fontWeight: 900, color: "#fff", marginBottom: "6px" }}>
+                    {result.best_method.pick_summary}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px", flexWrap: "wrap" }}>
+                    <span style={{
+                      background: "rgba(255,255,255,0.15)", color: "#fff", borderRadius: "10px",
+                      padding: "2px 10px", fontSize: "11px", fontWeight: 700,
+                    }}>
+                      {{ JC: "Juego Completo", H: "First 5 Innings", K: "Ponches", Solo: "Carreras Individuales",
+                         SI_NO: "1er Inning SI/NO", HCE: "Carreras+Hits+Errores", Linea: "Total Carreras", RL: "Run Line" }[result.best_method.market] || result.best_method.market}
+                    </span>
+                    <ConfidenceBadge pct={result.best_method.confidence_pct} />
+                  </div>
+                  <p style={{ fontSize: "12px", color: "#e2f5e9", margin: 0, lineHeight: 1.5, fontStyle: "italic" }}>
+                    {result.best_method.reasoning}
+                  </p>
+                </div>
+              )}
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
                 <MarketCard
@@ -732,7 +790,73 @@ ${result.away_team_runs?.reasoning}
                   reasoning={result.away_team_runs?.reasoning}
                   pickColorYes="#F4A261" pickColorNo="#4A90D9"
                 />
+                {result.first_five_innings && (
+                  <div style={{ background: "#142235", border: "1px solid #1e3a52", borderRadius: "10px", padding: "16px" }}>
+                    <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "8px" }}>
+                      ⏱️ FIRST 5 INNINGS
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px", flexWrap: "wrap" }}>
+                      <span style={{ fontSize: "18px", fontWeight: 900, color: "#F4A261" }}>
+                        {result.first_five_innings.winner === "home" ? home : away}
+                      </span>
+                      <ConfidenceBadge pct={result.first_five_innings.confidence_pct} />
+                    </div>
+                    <p style={{ fontSize: "12px", color: "#7a9ab8", margin: 0, lineHeight: 1.5, fontStyle: "italic" }}>
+                      {result.first_five_innings.reasoning}
+                    </p>
+                  </div>
+                )}
+                {result.run_line && (
+                  <div style={{ background: "#142235", border: "1px solid #1e3a52", borderRadius: "10px", padding: "16px" }}>
+                    <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "8px" }}>
+                      📏 RUN LINE ({result.run_line.spread})
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px", flexWrap: "wrap" }}>
+                      <span style={{ fontSize: "14px", color: "#c5d8ea" }}>
+                        {result.run_line.favored_team === "home" ? home : away}
+                      </span>
+                      <span style={{ fontSize: "18px", fontWeight: 900, color: result.run_line.covers === "SI" ? "#2D6A4F" : "#c0392b" }}>
+                        {result.run_line.covers === "SI" ? "CUBRE" : "NO CUBRE"}
+                      </span>
+                      <ConfidenceBadge pct={result.run_line.confidence_pct} />
+                    </div>
+                    <p style={{ fontSize: "12px", color: "#7a9ab8", margin: 0, lineHeight: 1.5, fontStyle: "italic" }}>
+                      {result.run_line.reasoning}
+                    </p>
+                  </div>
+                )}
+                {result.strikeouts_home && (
+                  <MarketCard
+                    icon="🔥" title={`PONCHES — ${home}`}
+                    pick={result.strikeouts_home.pick}
+                    line={result.strikeouts_home.line}
+                    confidence_pct={result.strikeouts_home.confidence_pct}
+                    reasoning={result.strikeouts_home.reasoning}
+                    pickColorYes="#F4A261" pickColorNo="#4A90D9"
+                  />
+                )}
+                {result.strikeouts_away && (
+                  <MarketCard
+                    icon="🔥" title={`PONCHES — ${away}`}
+                    pick={result.strikeouts_away.pick}
+                    line={result.strikeouts_away.line}
+                    confidence_pct={result.strikeouts_away.confidence_pct}
+                    reasoning={result.strikeouts_away.reasoning}
+                    pickColorYes="#F4A261" pickColorNo="#4A90D9"
+                  />
+                )}
+                {result.hce_total && (
+                  <MarketCard
+                    icon="📈" title="CARRERAS+HITS+ERRORES"
+                    pick={result.hce_total.pick}
+                    line={result.hce_total.line}
+                    confidence_pct={result.hce_total.confidence_pct}
+                    reasoning={result.hce_total.reasoning}
+                    pickColorYes="#F4A261" pickColorNo="#4A90D9"
+                  />
+                )}
               </div>
+
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px", marginBottom: "14px" }}>
                 {[
@@ -998,12 +1122,17 @@ ${result.away_team_runs?.reasoning}
           <h2 style={{ fontSize: "16px", margin: "0 0 6px", color: "#F0F4F8" }}>🍀 Top Picks del Día</h2>
           <p style={{ fontSize: "11px", color: "#3a5a78", marginBottom: "20px" }}>
             Elige cuántos partidos quieres y la app selecciona al azar entre los que ya analizaste hoy,
-            mostrando el equipo favorito de cada uno.
+            mostrando para cada uno el método (Juego Completo, First 5, Ponches, Run Line, etc.) con mayor probabilidad de acierto.
           </p>
 
           {todayAnalyzed.length === 0 ? (
             <p style={{ textAlign: "center", color: "#7a9ab8", fontSize: "13px", padding: "40px 0" }}>
               Aún no has analizado ningún partido hoy. Ve a "Partidos de Hoy" y analiza algunos primero.
+            </p>
+          ) : todayAnalyzed.every(e => !e.analysis?.best_method) ? (
+            <p style={{ textAlign: "center", color: "#7a9ab8", fontSize: "13px", padding: "40px 0" }}>
+              Los análisis de hoy son de una versión anterior sin el sistema de métodos.
+              Vuelve a analizar estos partidos para poder usar Top Picks.
             </p>
           ) : (
             <>
@@ -1043,7 +1172,7 @@ ${result.away_team_runs?.reasoning}
 
               {generatedPicks && generatedPicks.length > 0 && (
                 <div style={{ display: "flex", flexDirection: "column", gap: "10px", animation: "fadeIn .4s ease" }}>
-                  {generatedPicks.map(({ entry, favoredTeam, favoredPct }, idx) => (
+                  {generatedPicks.map(({ entry, marketLabel, pickSummary, confidence }, idx) => (
                     <div key={entry.id} style={{
                       background: "linear-gradient(135deg, #142235, #16314a)", border: "1px solid #2D6A4F",
                       borderRadius: "12px", padding: "16px", display: "flex", alignItems: "center", gap: "14px"
@@ -1055,13 +1184,13 @@ ${result.away_team_runs?.reasoning}
                       }}>{idx + 1}</div>
                       <div style={{ flex: 1 }}>
                         <div style={{ fontSize: "10px", color: "#7a9ab8", marginBottom: "2px" }}>
-                          {entry.away} @ {entry.home}
+                          {entry.away} @ {entry.home} · <span style={{ color: "#4A90D9" }}>{marketLabel}</span>
                         </div>
                         <div style={{ fontSize: "15px", fontWeight: 700, color: "#F4A261" }}>
-                          🍀 {favoredTeam}
+                          🍀 {pickSummary}
                         </div>
                       </div>
-                      <ConfidenceBadge pct={favoredPct} />
+                      <ConfidenceBadge pct={confidence} />
                     </div>
                   ))}
                 </div>
