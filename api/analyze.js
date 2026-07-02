@@ -264,29 +264,77 @@ Responde SOLO con JSON sin markdown, estructura exacta:
 {
   "home_win_pct": <entero 0-100>,
   "away_win_pct": <entero 0-100>,
+
   "first_inning": {
     "scores": "<SI|NO>",
     "confidence_pct": <entero 0-100>,
-    "reasoning": "<justificación basada en el abridor probable vs primer tercio del orden, 1 oración>"
+    "reasoning": "<SI significa que AL MENOS UN equipo anota en el 1er inning (combinado). NO significa que el 1er inning completo termina 0-0 entre ambos equipos. Justifica con abridores probables, 1 oración>"
   },
+
   "total_runs": {
     "line": <decimal ej 8.5>,
     "pick": "<OVER|UNDER>",
     "confidence_pct": <entero 0-100>,
-    "reasoning": "<justificación basada en ambos abridores y ofensivas, 1 oración>"
+    "reasoning": "<total de carreras COMBINADAS de ambos equipos en el juego completo, vs línea. Justifica con ambos abridores y ofensivas, 1 oración>"
   },
+
   "home_team_runs": {
     "line": <decimal ej 4.5>,
     "pick": "<OVER|UNDER>",
     "confidence_pct": <entero 0-100>,
-    "reasoning": "<justificación basada en bateo local vs abridor visitante, 1 oración>"
+    "reasoning": "<carreras SOLO del equipo local vs línea, basado en bateo local vs abridor visitante, 1 oración>"
   },
+
   "away_team_runs": {
     "line": <decimal ej 3.5>,
     "pick": "<OVER|UNDER>",
     "confidence_pct": <entero 0-100>,
-    "reasoning": "<justificación basada en bateo visitante vs abridor local, 1 oración>"
+    "reasoning": "<carreras SOLO del equipo visitante vs línea, basado en bateo visitante vs abridor local, 1 oración>"
   },
+
+  "first_five_innings": {
+    "winner": "<home|away>",
+    "confidence_pct": <entero 0-100>,
+    "reasoning": "<quién va ganando al final del inning 5 (first 5), basado principalmente en la comparación de abridores probables ya que suelen retirarse cerca del inning 5, 1 oración>"
+  },
+
+  "strikeouts_home": {
+    "line": <decimal ej 6.5>,
+    "pick": "<OVER|UNDER>",
+    "confidence_pct": <entero 0-100>,
+    "reasoning": "<ponches que el PITCHEO del equipo LOCAL logra (a favor), basado en K/9 del abridor local vs tendencia de ponches del lineup visitante, 1 oración>"
+  },
+
+  "strikeouts_away": {
+    "line": <decimal ej 6.5>,
+    "pick": "<OVER|UNDER>",
+    "confidence_pct": <entero 0-100>,
+    "reasoning": "<ponches que el PITCHEO del equipo VISITANTE logra (a favor), basado en K/9 del abridor visitante vs tendencia de ponches del lineup local, 1 oración>"
+  },
+
+  "hce_total": {
+    "line": <decimal ej 21.5>,
+    "pick": "<OVER|UNDER>",
+    "confidence_pct": <entero 0-100>,
+    "reasoning": "<total combinado de Carreras+Hits+Errores de AMBOS equipos vs línea. Suele ser un número más alto que la línea de carreras solas, ya que incluye hits y errores. Justifica brevemente, 1 oración>"
+  },
+
+  "run_line": {
+    "favored_team": "<home|away, el equipo con mayor % en home_win_pct/away_win_pct>",
+    "spread": "<-1.5 o -2.5, el hándicap que se le resta al favorito>",
+    "covers": "<SI|NO, si el favorito gana por más carreras que el spread>",
+    "confidence_pct": <entero 0-100>,
+    "reasoning": "<justifica si el margen de victoria esperado del favorito supera el spread, considerando fuerza ofensiva y bullpen rival, 1 oración>"
+  },
+
+  "best_method": {
+    "market": "<JC|H|K|Solo|SI_NO|HCE|Linea|RL>",
+    "team_or_side": "<nombre del equipo si aplica (JC, H, K, Solo, RL), o 'Ambos equipos' si aplica (SI_NO, HCE, Linea)>",
+    "pick_summary": "<resumen corto y claro del pick recomendado, ej: 'Yankees ganan el juego completo' o 'Under 6.5 ponches Dodgers' o 'NO anotan en el 1er inning', máximo 12 palabras>",
+    "confidence_pct": <entero 0-100>,
+    "reasoning": "<por qué este mercado específico tiene mejor probabilidad de acierto que simplemente el ganador del juego completo, 1-2 oraciones>"
+  },
+
   "pitching_edge": "<equipo con ventaja, priorizando comparación de abridores probables si están disponibles, 1 oración>",
   "bullpen_risk": "<riesgo bullpen, 1 oración>",
   "batting_edge": "<ventaja bateo, usando alineación titular si está disponible, 1 oración>",
@@ -295,7 +343,10 @@ Responde SOLO con JSON sin markdown, estructura exacta:
   "analyst_take": "<conclusión final, 2 oraciones>"
 }
 
-home_win_pct + away_win_pct = 100 exactamente.`;
+REGLAS IMPORTANTES:
+- home_win_pct + away_win_pct = 100 exactamente.
+- "best_method" es el campo MÁS IMPORTANTE para el sistema de picks: evalúa los 8 métodos disponibles (JC=juego completo, H=first 5 innings, K=ponches a favor de un equipo, Solo=carreras de un equipo específico, SI_NO=anotación combinada en el 1er inning, HCE=total carreras+hits+errores combinado, Linea=total carreras combinado, RL=run line con spread) y elige el que consideres tiene MAYOR probabilidad real de acierto para este partido específico — no siempre debe ser el ganador del juego completo.
+- Todas las líneas numéricas (line, spread) deben ser realistas para MLB basadas en los datos reales proporcionados, no números genéricos repetidos.`;
 
     // 4. Call Groq API
     const groqRes = await fetch(GROQ_API, {
@@ -306,7 +357,7 @@ home_win_pct + away_win_pct = 100 exactamente.`;
       },
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
-        max_tokens: 1200,
+        max_tokens: 2200,
         temperature: 0.3,
         messages: [
           {
