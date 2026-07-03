@@ -218,6 +218,9 @@ export default function MLBPredictor() {
   const [showStats, setShowStats] = useState(false);
 
   const [todayGames, setTodayGames] = useState([]);
+  const [standings, setStandings] = useState(null);
+  const [loadingStandings, setLoadingStandings] = useState(false);
+  const [standingsError, setStandingsError] = useState("");
   const [loadingGames, setLoadingGames] = useState(false);
   const [gamesError, setGamesError] = useState("");
 
@@ -363,6 +366,28 @@ export default function MLBPredictor() {
   useEffect(() => {
     if (tab === "today" && todayGames.length === 0 && !loadingGames) {
       loadTodayGames();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
+  const loadStandings = async () => {
+    setLoadingStandings(true);
+    setStandingsError("");
+    try {
+      const res = await fetch("/api/standings");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error al cargar posiciones");
+      setStandings(data);
+    } catch (e) {
+      setStandingsError(`Error: ${e.message}`);
+    } finally {
+      setLoadingStandings(false);
+    }
+  };
+
+  useEffect(() => {
+    if (tab === "standings" && !standings && !loadingStandings) {
+      loadStandings();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
@@ -544,6 +569,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
         <TabButton active={tab === "history"} onClick={() => setTab("history")}>🕓 Historial ({history.length})</TabButton>
         <TabButton active={tab === "track"} onClick={() => setTab("track")}>🎯 Track Record</TabButton>
         <TabButton active={tab === "picks"} onClick={() => setTab("picks")}>🍀 Top Picks</TabButton>
+        <TabButton active={tab === "standings"} onClick={() => setTab("standings")}>🏆 Posiciones</TabButton>
       </div>
 
       {tab === "predictor" && (
@@ -1201,6 +1227,76 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
           <p style={{ textAlign: "center", fontSize: "11px", color: "#3a5a78", marginTop: "16px" }}>
             Selección aleatoria entre partidos ya analizados · Basado en el equipo favorecido de cada análisis con datos reales de MLB.
           </p>
+        </div>
+      )}
+
+      {tab === "standings" && (
+        <div style={{ maxWidth: "680px", margin: "0 auto", animation: "fadeIn .4s ease" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+            <h2 style={{ fontSize: "16px", margin: 0, color: "#F0F4F8" }}>
+              🏆 Posiciones — Temporada Regular {standings?.season || new Date().getFullYear()}
+            </h2>
+            <button onClick={loadStandings} disabled={loadingStandings} style={{
+              background: "#142235", border: "1px solid #1e3a52", color: "#4A90D9",
+              borderRadius: "6px", padding: "6px 12px", fontSize: "11px", cursor: "pointer",
+            }}>
+              {loadingStandings ? "..." : "🔄"}
+            </button>
+          </div>
+          <p style={{ fontSize: "11px", color: "#3a5a78", marginBottom: "18px" }}>
+            GB = juegos detrás del líder · Últ. 10 = récord en los últimos 10 juegos · Rest. = juegos restantes en temporada regular (162 total)
+          </p>
+
+          {loadingStandings && <DiamondLoader />}
+          {standingsError && <p style={{ color: "#e74c3c", textAlign: "center", fontSize: "13px" }}>{standingsError}</p>}
+
+          {standings?.divisions && Object.entries(standings.divisions)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([divName, divData]) => (
+              <div key={divName} style={{ marginBottom: "20px" }}>
+                <div style={{
+                  fontSize: "12px", fontWeight: 700, color: divData.league === "AL" ? "#4A90D9" : "#F4A261",
+                  letterSpacing: "0.1em", marginBottom: "8px", paddingLeft: "4px",
+                }}>
+                  {divName}
+                </div>
+                <div style={{ background: "#142235", border: "1px solid #1e3a52", borderRadius: "12px", overflow: "hidden" }}>
+                  <div style={{
+                    display: "grid", gridTemplateColumns: "1.2fr 0.5fr 0.5fr 0.5fr 0.6fr 0.6fr 0.5fr",
+                    padding: "8px 12px", background: "#0f1e2e", fontSize: "10px", color: "#4a6a88", fontWeight: 700,
+                  }}>
+                    <span>EQUIPO</span>
+                    <span style={{ textAlign: "center" }}>G</span>
+                    <span style={{ textAlign: "center" }}>P</span>
+                    <span style={{ textAlign: "center" }}>GB</span>
+                    <span style={{ textAlign: "center" }}>Últ.10</span>
+                    <span style={{ textAlign: "center" }}>Racha</span>
+                    <span style={{ textAlign: "center" }}>Rest.</span>
+                  </div>
+                  {divData.teams.map((team, idx) => (
+                    <div key={team.teamId} style={{
+                      display: "grid", gridTemplateColumns: "1.2fr 0.5fr 0.5fr 0.5fr 0.6fr 0.6fr 0.5fr",
+                      padding: "10px 12px", fontSize: "12px", alignItems: "center",
+                      borderTop: idx > 0 ? "1px solid #1e3a52" : "none",
+                      background: idx === 0 ? "rgba(45,106,79,0.15)" : "transparent",
+                    }}>
+                      <span style={{ color: "#F0F4F8", fontWeight: idx === 0 ? 700 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {idx === 0 && "🥇 "}{team.name}
+                      </span>
+                      <span style={{ textAlign: "center", color: "#2D6A4F", fontWeight: 700 }}>{team.wins}</span>
+                      <span style={{ textAlign: "center", color: "#c0392b" }}>{team.losses}</span>
+                      <span style={{ textAlign: "center", color: "#7a9ab8" }}>{team.gamesBack}</span>
+                      <span style={{ textAlign: "center", color: "#7a9ab8", fontSize: "11px" }}>{team.last10}</span>
+                      <span style={{
+                        textAlign: "center", fontSize: "11px",
+                        color: team.streak?.startsWith("W") ? "#2D6A4F" : team.streak?.startsWith("L") ? "#c0392b" : "#7a9ab8"
+                      }}>{team.streak}</span>
+                      <span style={{ textAlign: "center", color: "#4A90D9", fontSize: "11px" }}>{team.gamesRemaining}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
         </div>
       )}
     </div>
