@@ -7,7 +7,7 @@ const TEAMS = [
   "Seattle Mariners", "Chicago Cubs", "Boston Red Sox", "Toronto Blue Jays",
   "New York Mets", "Milwaukee Brewers", "Cincinnati Reds", "Cleveland Guardians",
   "Detroit Tigers", "Miami Marlins", "Kansas City Royals", "Chicago White Sox",
-  "Oakland Athletics", "Pittsburgh Pirates", "Colorado Rockies", "Washington Nationals",
+  "Athletics", "Pittsburgh Pirates", "Colorado Rockies", "Washington Nationals",
   "St. Louis Cardinals", "Los Angeles Angels",
 ];
 
