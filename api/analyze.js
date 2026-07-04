@@ -30,6 +30,7 @@ const TEAM_IDS = {
   "Kansas City Royals": 118,
   "Chicago White Sox": 145,
   "Oakland Athletics": 133,
+  "Athletics": 133,
   "Pittsburgh Pirates": 134,
   "Colorado Rockies": 115,
   "Washington Nationals": 120,
