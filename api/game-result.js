@@ -5,18 +5,23 @@ const MLB_BASE = "https://statsapi.mlb.com/api/v1";
 
 async function fetchGameResult(gamePk) {
   try {
-    const res = await fetch(`${MLB_BASE}/game/${gamePk}/linescore`);
+    // The /schedule endpoint (filtered by gamePk) reliably reports the official
+    // game status ("Final") — the /linescore endpoint's inningState field is not
+    // a dependable way to detect completion.
+    const res = await fetch(`${MLB_BASE}/schedule?gamePk=${gamePk}&hydrate=linescore`);
     const data = await res.json();
+    const game = data?.dates?.[0]?.games?.[0];
 
-    if (!data || data.currentInning === undefined) {
-      return { gamePk, final: false };
-    }
+    if (!game) return { gamePk, final: false };
 
-    const isFinal = data.isGameOver === true || data.inningState === "Final";
+    const abstractState = game.status?.abstractGameState || ""; // "Preview" | "Live" | "Final"
+    const detailedState = game.status?.detailedState || ""; // "Final", "Game Over", "Completed Early", etc.
+    const isFinal = abstractState === "Final" || detailedState.toLowerCase().includes("final") || detailedState.toLowerCase().includes("completed");
+
     if (!isFinal) return { gamePk, final: false };
 
-    const homeRuns = data.teams?.home?.runs;
-    const awayRuns = data.teams?.away?.runs;
+    const homeRuns = game.teams?.home?.score;
+    const awayRuns = game.teams?.away?.score;
 
     if (homeRuns === undefined || awayRuns === undefined) {
       return { gamePk, final: false };
