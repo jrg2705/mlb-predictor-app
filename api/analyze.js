@@ -330,7 +330,11 @@ Responde SOLO con JSON sin markdown, estructura exacta:
 
   "best_method": {
     "market": "<JC|H|K|Solo|SI_NO|HCE|Linea|RL>",
-    "team_or_side": "<nombre del equipo si aplica (JC, H, K, Solo, RL), o 'Ambos equipos' si aplica (SI_NO, HCE, Linea)>",
+    "side": "<home|away, SOLO si el mercado es JC, H, K, Solo o RL (el lado al que aplica el pick). Si el mercado es SI_NO, HCE o Linea (mercados combinados de ambos equipos), usa 'combined'>",
+    "team_or_side": "<nombre del equipo si aplica (JC, H, K, Solo, RL), o 'Ambos equipos' si aplica (SI_NO, HCE, Linea) — SOLO para mostrar en pantalla, no se usa para verificar>",
+    "line": "<número decimal si el mercado es K, Solo, HCE o Linea (ej 6.5). Si el mercado es JC, H, SI_NO o RL, usa null>",
+    "pick": "<OVER|UNDER si el mercado es K, Solo, HCE o Linea. SI|NO si el mercado es SI_NO o RL (RL: SI=cubre el spread, NO=no cubre). Si el mercado es JC o H, usa null>",
+    "spread": "<solo si el mercado es RL: el spread numérico ej -1.5. En cualquier otro mercado usa null>",
     "pick_summary": "<resumen corto y claro del pick recomendado, ej: 'Yankees ganan el juego completo' o 'Under 6.5 ponches Dodgers' o 'NO anotan en el 1er inning', máximo 12 palabras>",
     "confidence_pct": <entero 0-100>,
     "reasoning": "<por qué este mercado específico tiene mejor probabilidad de acierto que simplemente el ganador del juego completo, 1-2 oraciones>"
@@ -347,6 +351,7 @@ Responde SOLO con JSON sin markdown, estructura exacta:
 REGLAS IMPORTANTES:
 - home_win_pct + away_win_pct = 100 exactamente.
 - "best_method" es el campo MÁS IMPORTANTE para el sistema de picks: evalúa los 8 métodos disponibles (JC=juego completo, H=first 5 innings, K=ponches a favor de un equipo, Solo=carreras de un equipo específico, SI_NO=anotación combinada en el 1er inning, HCE=total carreras+hits+errores combinado, Linea=total carreras combinado, RL=run line con spread) y elige el que consideres tiene MAYOR probabilidad real de acierto para este partido específico — no siempre debe ser el ganador del juego completo.
+- Los campos "side", "line", "pick" y "spread" dentro de "best_method" son OBLIGATORIOS y deben coincidir exactamente con el mercado elegido (usa null en los que no apliquen según la tabla del propio campo). Estos se usan para verificación automática de resultados, así que deben ser precisos y consistentes con el resto del análisis (por ejemplo, si "market" es "K" y el pick es sobre el equipo local, "side" debe ser "home" y "line" debe coincidir con la línea usada en strikeouts_home).
 - Todas las líneas numéricas (line, spread) deben ser realistas para MLB basadas en los datos reales proporcionados, no números genéricos repetidos.`;
 
     // 4. Call Groq API
@@ -358,7 +363,7 @@ REGLAS IMPORTANTES:
       },
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
-        max_tokens: 2200,
+        max_tokens: 2500,
         temperature: 0.3,
         messages: [
           {
