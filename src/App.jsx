@@ -67,13 +67,83 @@ function confidenceBand(pct) {
   return "below-55";
 }
 
-function recordOutcome(entry, winner) {
-  // winner: "home" | "away"
+// Evaluates whether the AI's "best_method" pick for a matchup was correct,
+// using the full real game result (gameResult) returned by /api/game-result.
+// Returns null if the method or required data isn't available (skip, don't count as wrong).
+function evaluateBestMethod(bestMethod, gameResult) {
+  if (!bestMethod || !gameResult || !gameResult.final) return null;
+  const { market, side, pick } = bestMethod;
+  const line = bestMethod.line !== null && bestMethod.line !== undefined ? parseFloat(bestMethod.line) : NaN;
+
+  switch (market) {
+    case "JC": {
+      if (side !== "home" && side !== "away") return null;
+      if (gameResult.winner === "tie") return null;
+      return side === gameResult.winner;
+    }
+    case "H": {
+      if (side !== "home" && side !== "away") return null;
+      if (gameResult.first5Winner === "tie") return null;
+      return side === gameResult.first5Winner;
+    }
+    case "K": {
+      if (side !== "home" && side !== "away") return null;
+      if (isNaN(line)) return null;
+      const actualK = side === "home" ? gameResult.homeStrikeoutsPitching : gameResult.awayStrikeoutsPitching;
+      if (pick === "OVER") return actualK > line;
+      if (pick === "UNDER") return actualK < line;
+      return null;
+    }
+    case "Solo": {
+      if (side !== "home" && side !== "away") return null;
+      if (isNaN(line)) return null;
+      const actualRuns = side === "home" ? gameResult.homeRuns : gameResult.awayRuns;
+      if (pick === "OVER") return actualRuns > line;
+      if (pick === "UNDER") return actualRuns < line;
+      return null;
+    }
+    case "SI_NO": {
+      if (pick === "SI") return gameResult.firstInningScored === true;
+      if (pick === "NO") return gameResult.firstInningScored === false;
+      return null;
+    }
+    case "HCE": {
+      if (isNaN(line)) return null;
+      if (pick === "OVER") return gameResult.totalHitsErrorsRuns > line;
+      if (pick === "UNDER") return gameResult.totalHitsErrorsRuns < line;
+      return null;
+    }
+    case "Linea": {
+      if (isNaN(line)) return null;
+      const totalRuns = gameResult.homeRuns + gameResult.awayRuns;
+      if (pick === "OVER") return totalRuns > line;
+      if (pick === "UNDER") return totalRuns < line;
+      return null;
+    }
+    case "RL": {
+      if (side !== "home" && side !== "away") return null;
+      const spread = Math.abs(parseFloat(bestMethod.spread)) || 1.5;
+      const sideWon = side === gameResult.winner;
+      const covers = sideWon && gameResult.marginRuns > spread;
+      if (pick === "SI") return covers === true;
+      if (pick === "NO") return covers === false;
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+function recordOutcome(entry, gameResult) {
   const record = loadTrackRecord();
-  const favoredPct = Math.max(entry.analysis.home_win_pct, entry.analysis.away_win_pct);
-  const favoredSide = entry.analysis.home_win_pct >= entry.analysis.away_win_pct ? "home" : "away";
-  const band = confidenceBand(favoredPct);
-  const wasCorrect = favoredSide === winner;
+  const bestMethod = entry.analysis?.best_method;
+  const wasCorrect = evaluateBestMethod(bestMethod, gameResult);
+
+  // If we can't evaluate this method (missing data/unsupported), skip counting it
+  if (wasCorrect === null) return record;
+
+  const confidencePct = bestMethod?.confidence_pct ?? 0;
+  const band = confidenceBand(confidencePct);
 
   record.total += 1;
   if (wasCorrect) record.correct += 1;
@@ -206,6 +276,7 @@ const TabButton = ({ active, onClick, children }) => (
 );
 
 export default function MLBPredictor() {
+  const [showSplash, setShowSplash] = useState(true);
   const [tab, setTab] = useState("predictor");
   const [home, setHome] = useState("");
   const [away, setAway] = useState("");
@@ -233,6 +304,11 @@ export default function MLBPredictor() {
   const [notifPermission, setNotifPermission] = useState(
     typeof Notification !== "undefined" ? Notification.permission : "unsupported"
   );
+
+  useEffect(() => {
+    const timer = setTimeout(() => setShowSplash(false), 1800);
+    return () => clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     const loadedHistory = loadHistory();
@@ -271,11 +347,18 @@ export default function MLBPredictor() {
 
       pending.forEach(entry => {
         const gameResult = resultsByPk[entry.gamePk];
-        if (gameResult && gameResult.final && gameResult.winner !== "tie") {
-          record = recordOutcome(entry, gameResult.winner);
+        if (gameResult && gameResult.final) {
+          record = recordOutcome(entry, gameResult);
+          const bestMethodCorrect = evaluateBestMethod(entry.analysis?.best_method, gameResult);
           updatedHistory = updatedHistory.map(e =>
             e.id === entry.id
-              ? { ...e, verified: true, actualWinner: gameResult.winner, actualScore: `${gameResult.awayRuns}-${gameResult.homeRuns}` }
+              ? {
+                  ...e,
+                  verified: true,
+                  actualWinner: gameResult.winner,
+                  actualScore: `${gameResult.awayRuns}-${gameResult.homeRuns}`,
+                  bestMethodCorrect, // true | false | null (null = couldn't be evaluated)
+                }
               : e
           );
         }
@@ -539,17 +622,40 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
   };
 
   return (
-    <div style={{
-      minHeight: "100vh", background: "#0D1B2A", color: "#F0F4F8",
-      fontFamily: "'Segoe UI', system-ui, sans-serif", padding: "24px 16px",
-    }}>
-      <style>{`
-        @keyframes fadeIn { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
-        select option { background: #142235; }
-        button:hover:not(:disabled) { filter: brightness(1.1); }
-      `}</style>
+    <>
+      {showSplash && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 9999,
+          background: "#000000",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          animation: "splashFadeOut 0.5s ease 1.3s forwards",
+        }}>
+          <style>{`
+            @keyframes splashFadeOut { from { opacity: 1; } to { opacity: 0; visibility: hidden; } }
+            @keyframes splashZoom { from { transform: scale(1.04); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+          `}</style>
+          <img
+            src="/splash.jpg"
+            alt="MLB Predictor"
+            style={{
+              width: "100%", height: "100%", objectFit: "cover",
+              animation: "splashZoom 0.6s ease",
+            }}
+          />
+        </div>
+      )}
 
-      <div style={{ textAlign: "center", marginBottom: "24px" }}>
+      <div style={{
+        minHeight: "100vh", background: "#0D1B2A", color: "#F0F4F8",
+        fontFamily: "'Segoe UI', system-ui, sans-serif", padding: "24px 16px",
+      }}>
+        <style>{`
+          @keyframes fadeIn { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
+          select option { background: #142235; }
+          button:hover:not(:disabled) { filter: brightness(1.1); }
+        `}</style>
+
+        <div style={{ textAlign: "center", marginBottom: "24px" }}>
         <div style={{ fontSize: "11px", letterSpacing: "0.25em", color: "#4A90D9", textTransform: "uppercase", marginBottom: "6px" }}>
           ⚾ MLB Stats API · Groq AI · Datos Reales
         </div>
@@ -1043,15 +1149,15 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                   <span>1er Inn: <strong style={{ color: entry.analysis?.first_inning?.scores === "SI" ? "#E63946" : "#2D6A4F" }}>{entry.analysis?.first_inning?.scores}</strong></span>
                   <span>Total: <strong style={{ color: "#F0F4F8" }}>{entry.analysis?.total_runs?.pick}</strong></span>
                   {entry.verified && (
-                    (() => {
-                      const favoredSide = entry.analysis.home_win_pct >= entry.analysis.away_win_pct ? "home" : "away";
-                      const correct = favoredSide === entry.actualWinner;
-                      return (
-                        <span style={{ color: correct ? "#2D6A4F" : "#c0392b", fontWeight: 700 }}>
-                          {correct ? "✅ Acertó" : "❌ Falló"} ({entry.actualScore})
-                        </span>
-                      );
-                    })()
+                    entry.bestMethodCorrect === null ? (
+                      <span style={{ color: "#7a9ab8", fontWeight: 600 }}>
+                        ⚪ No verificable ({entry.actualScore})
+                      </span>
+                    ) : (
+                      <span style={{ color: entry.bestMethodCorrect ? "#2D6A4F" : "#c0392b", fontWeight: 700 }}>
+                        {entry.bestMethodCorrect ? "✅ Acertó" : "❌ Falló"} Mejor Método ({entry.actualScore})
+                      </span>
+                    )
                   )}
                 </div>
               </div>
@@ -1074,7 +1180,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
             )}
           </div>
           <p style={{ fontSize: "11px", color: "#3a5a78", marginBottom: "16px" }}>
-            Independiente del historial · No se borra al limpiar el historial · Verificado automáticamente con MLB Stats API
+            Mide el acierto del pick "🏆 Mejor Método" de cada análisis (no siempre es el ganador del juego) · Independiente del historial · No se borra al limpiar el historial · Verificado automáticamente con MLB Stats API
           </p>
 
           {verifying && (
@@ -1095,7 +1201,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                 borderRadius: "12px", padding: "24px", textAlign: "center", marginBottom: "16px"
               }}>
                 <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "8px" }}>
-                  PRECISIÓN GENERAL (EQUIPO FAVORITO)
+                  PRECISIÓN GENERAL (MEJOR MÉTODO)
                 </div>
                 <div style={{ fontSize: "42px", fontWeight: 900, color: "#F4A261" }}>
                   {Math.round((trackRecord.correct / trackRecord.total) * 100)}%
@@ -1299,6 +1405,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
             ))}
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }
