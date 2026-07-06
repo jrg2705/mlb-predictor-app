@@ -379,7 +379,7 @@ export default function MLBPredictor() {
     setTrackRecord({ total: 0, correct: 0, byBand: {} });
   };
 
-  const analyze = async (homeTeam = home, awayTeam = away) => {
+  const analyze = async (homeTeam = home, awayTeam = away, specificGamePk = null) => {
     if (!homeTeam || !awayTeam || homeTeam === awayTeam) {
       setError("Selecciona dos equipos diferentes.");
       return;
@@ -398,7 +398,7 @@ export default function MLBPredictor() {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ home: homeTeam, away: awayTeam }),
+        body: JSON.stringify({ home: homeTeam, away: awayTeam, gamePk: specificGamePk }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Error del servidor");
@@ -1093,7 +1093,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                     {g.venue && ` · ${g.venue}`}
                   </div>
                 </div>
-                <button onClick={() => analyze(g.home.name, g.away.name)} style={{
+                <button onClick={() => analyze(g.home.name, g.away.name, g.gamePk)} style={{
                   background: "linear-gradient(135deg, #2D6A4F, #1a4a35)", border: "none",
                   color: "#fff", borderRadius: "6px", padding: "8px 16px", fontSize: "11px",
                   fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap",
