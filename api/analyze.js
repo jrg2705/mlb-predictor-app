@@ -97,7 +97,32 @@ async function fetchHeadToHead(homeId, awayId) {
 
 // Find today's (or nearest upcoming) scheduled game between these two teams,
 // and pull probable pitchers + gamePk for later lineup lookup.
-async function fetchUpcomingGameInfo(homeId, awayId) {
+// If specificGamePk is provided (e.g. user tapped a specific card in "Partidos de Hoy"),
+// fetch that exact game directly instead of guessing — this correctly handles doubleheaders
+// where the same two teams play twice in one day.
+async function fetchUpcomingGameInfo(homeId, awayId, specificGamePk = null) {
+  if (specificGamePk) {
+    try {
+      const res = await fetch(
+        `${MLB_BASE}/schedule?gamePk=${specificGamePk}&hydrate=probablePitcher,team`
+      );
+      const data = await res.json();
+      const match = data?.dates?.[0]?.games?.[0];
+      if (match) {
+        return {
+          gamePk: match.gamePk,
+          gameDate: match.gameDate,
+          status: match.status?.detailedState,
+          homeProbablePitcher: match.teams?.home?.probablePitcher || null,
+          awayProbablePitcher: match.teams?.away?.probablePitcher || null,
+        };
+      }
+      // If the specific gamePk lookup fails for some reason, fall through to the search below
+    } catch {
+      // fall through to search below
+    }
+  }
+
   try {
     const today = new Date();
     const startDate = today.toISOString().split("T")[0];
@@ -112,13 +137,19 @@ async function fetchUpcomingGameInfo(homeId, awayId) {
     const games = data?.dates?.flatMap(d => d.games) || [];
 
     // Find the next game where the opponent matches awayId (home vs away specifically)
-    const match = games.find(g => {
+    const now = new Date();
+    const matches = games.filter(g => {
       const h = g.teams?.home?.team?.id;
       const a = g.teams?.away?.team?.id;
       return (h === homeId && a === awayId) || (h === awayId && a === homeId);
     });
 
-    if (!match) return null;
+    if (matches.length === 0) return null;
+
+    // If there are multiple matches (doubleheader), prefer the soonest one that
+    // hasn't started yet; otherwise just take the earliest by date.
+    matches.sort((a, b) => new Date(a.gameDate) - new Date(b.gameDate));
+    const match = matches.find(g => new Date(g.gameDate) >= now) || matches[0];
 
     return {
       gamePk: match.gamePk,
@@ -191,7 +222,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { home, away } = req.body;
+  const { home, away, gamePk: requestedGamePk } = req.body;
   if (!home || !away) return res.status(400).json({ error: "home and away teams are required" });
 
   const homeId = TEAM_IDS[home];
@@ -204,7 +235,7 @@ export default async function handler(req, res) {
       fetchMLBStats(homeId),
       fetchMLBStats(awayId),
       fetchHeadToHead(homeId, awayId),
-      fetchUpcomingGameInfo(homeId, awayId),
+      fetchUpcomingGameInfo(homeId, awayId, requestedGamePk),
     ]);
 
     // 2. Fetch probable pitcher stats (if known) + lineup (if published)
