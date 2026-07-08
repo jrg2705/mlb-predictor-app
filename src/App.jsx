@@ -595,26 +595,67 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
     HCE: "Carreras+Hits+Errores", Linea: "Total Carreras", RL: "Run Line",
   };
 
+  // Max picks allowed from the same market in a single Top Picks generation —
+  // mirrors typical sportsbook combined-parlay restrictions (4-5 per market).
+  const MAX_PER_MARKET = 5;
+
   const buildTopPicks = (count) => {
-    const withMethod = todayAnalyzed
-      .filter(entry => entry.analysis?.best_method) // only entries with the new field
-      .map(entry => {
-        const bm = entry.analysis.best_method;
-        return {
-          entry,
-          market: bm.market,
-          marketLabel: METHOD_LABELS[bm.market] || bm.market,
-          pickSummary: bm.pick_summary,
-          confidence: bm.confidence_pct,
-        };
-      });
-    // Shuffle (Fisher-Yates) then take the requested count — random selection each time
-    const shuffled = [...withMethod];
+    const eligible = todayAnalyzed.filter(entry => entry.analysis?.best_method);
+
+    // Shuffle first so the order games are considered in is random each time,
+    // not biased toward whichever was analyzed first.
+    const shuffled = [...eligible];
     for (let i = shuffled.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
     }
-    return shuffled.slice(0, count);
+
+    const marketCounts = {};
+    const picks = [];
+    const skippedForLater = []; // entries whose best_method was saturated and had no usable alternative
+
+    for (const entry of shuffled) {
+      if (picks.length >= count) break;
+
+      const bm = entry.analysis.best_method;
+      const alt = entry.analysis.alternative_method;
+      const bmMarket = bm?.market;
+      const bmCount = marketCounts[bmMarket] || 0;
+
+      if (bmMarket && bmCount < MAX_PER_MARKET) {
+        // Best method still has room under the cap — use it
+        marketCounts[bmMarket] = bmCount + 1;
+        picks.push({
+          entry, market: bmMarket, marketLabel: METHOD_LABELS[bmMarket] || bmMarket,
+          pickSummary: bm.pick_summary, confidence: bm.confidence_pct, usedAlternative: false,
+        });
+      } else if (alt?.market && (marketCounts[alt.market] || 0) < MAX_PER_MARKET) {
+        // Best method saturated — fall back to this game's alternative market
+        marketCounts[alt.market] = (marketCounts[alt.market] || 0) + 1;
+        picks.push({
+          entry, market: alt.market, marketLabel: METHOD_LABELS[alt.market] || alt.market,
+          pickSummary: alt.pick_summary, confidence: alt.confidence_pct, usedAlternative: true,
+        });
+      } else {
+        // Both options saturated for this game — try again after a full pass in case room opens up
+        skippedForLater.push(entry);
+      }
+    }
+
+    // Second pass: if we still need more picks and some were skipped, allow best_method
+    // through even over the cap rather than showing fewer picks than requested.
+    if (picks.length < count && skippedForLater.length > 0) {
+      for (const entry of skippedForLater) {
+        if (picks.length >= count) break;
+        const bm = entry.analysis.best_method;
+        picks.push({
+          entry, market: bm.market, marketLabel: METHOD_LABELS[bm.market] || bm.market,
+          pickSummary: bm.pick_summary, confidence: bm.confidence_pct, usedAlternative: false, overCap: true,
+        });
+      }
+    }
+
+    return picks;
   };
 
   const handleGeneratePicks = () => {
@@ -1254,7 +1295,8 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
           <h2 style={{ fontSize: "16px", margin: "0 0 6px", color: "#F0F4F8" }}>🍀 Top Picks del Día</h2>
           <p style={{ fontSize: "11px", color: "#3a5a78", marginBottom: "20px" }}>
             Elige cuántos partidos quieres y la app selecciona al azar entre los que ya analizaste hoy,
-            mostrando para cada uno el método (Juego Completo, First 5, Ponches, Run Line, etc.) con mayor probabilidad de acierto.
+            repartiendo automáticamente entre distintos mercados (máximo {MAX_PER_MARKET} picks del mismo mercado)
+            para respetar los límites típicos de las casas de apuestas.
           </p>
 
           {todayAnalyzed.length === 0 ? (
@@ -1304,7 +1346,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
 
               {generatedPicks && generatedPicks.length > 0 && (
                 <div style={{ display: "flex", flexDirection: "column", gap: "10px", animation: "fadeIn .4s ease" }}>
-                  {generatedPicks.map(({ entry, marketLabel, pickSummary, confidence }, idx) => (
+                  {generatedPicks.map(({ entry, marketLabel, pickSummary, confidence, usedAlternative, overCap }, idx) => (
                     <div key={entry.id} style={{
                       background: "linear-gradient(135deg, #142235, #16314a)", border: "1px solid #2D6A4F",
                       borderRadius: "12px", padding: "16px", display: "flex", alignItems: "center", gap: "14px"
@@ -1317,6 +1359,8 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                       <div style={{ flex: 1 }}>
                         <div style={{ fontSize: "10px", color: "#7a9ab8", marginBottom: "2px" }}>
                           {entry.away} @ {entry.home} · <span style={{ color: "#4A90D9" }}>{marketLabel}</span>
+                          {usedAlternative && <span style={{ color: "#F4A261" }}> · alternativa</span>}
+                          {overCap && <span style={{ color: "#c0392b" }}> · sobre límite</span>}
                         </div>
                         <div style={{ fontSize: "15px", fontWeight: 700, color: "#F4A261" }}>
                           🍀 {pickSummary}
