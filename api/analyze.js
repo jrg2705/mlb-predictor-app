@@ -371,6 +371,18 @@ Responde SOLO con JSON sin markdown, estructura exacta:
     "reasoning": "<por qué este mercado específico tiene mejor probabilidad de acierto que simplemente el ganador del juego completo, 1-2 oraciones>"
   },
 
+  "alternative_method": {
+    "market": "<JC|H|K|Solo|SI_NO|HCE|Linea|RL — OBLIGATORIO: debe ser un mercado DIFERENTE al elegido en best_method>",
+    "side": "<mismo formato que en best_method>",
+    "team_or_side": "<mismo formato que en best_method>",
+    "line": "<mismo formato que en best_method>",
+    "pick": "<mismo formato que en best_method>",
+    "spread": "<mismo formato que en best_method>",
+    "pick_summary": "<resumen corto, máximo 12 palabras>",
+    "confidence_pct": <entero 0-100>,
+    "reasoning": "<por qué este mercado alternativo también es una opción sólida para este partido, 1 oración>"
+  },
+
   "pitching_edge": "<equipo con ventaja, priorizando comparación de abridores probables si están disponibles, 1 oración>",
   "bullpen_risk": "<riesgo bullpen, 1 oración>",
   "batting_edge": "<ventaja bateo, usando alineación titular si está disponible, 1 oración>",
@@ -382,7 +394,9 @@ Responde SOLO con JSON sin markdown, estructura exacta:
 REGLAS IMPORTANTES:
 - home_win_pct + away_win_pct = 100 exactamente.
 - "best_method" es el campo MÁS IMPORTANTE para el sistema de picks: evalúa los 8 métodos disponibles (JC=juego completo, H=first 5 innings, K=ponches a favor de un equipo, Solo=carreras de un equipo específico, SI_NO=anotación combinada en el 1er inning, HCE=total carreras+hits+errores combinado, Linea=total carreras combinado, RL=run line con spread) y elige el que consideres tiene MAYOR probabilidad real de acierto para este partido específico — no siempre debe ser el ganador del juego completo.
-- Los campos "side", "line", "pick" y "spread" dentro de "best_method" son OBLIGATORIOS y deben coincidir exactamente con el mercado elegido (usa null en los que no apliquen según la tabla del propio campo). Estos se usan para verificación automática de resultados, así que deben ser precisos y consistentes con el resto del análisis (por ejemplo, si "market" es "K" y el pick es sobre el equipo local, "side" debe ser "home" y "line" debe coincidir con la línea usada en strikeouts_home).
+- IMPORTANTE SOBRE VARIEDAD: evita el sesgo de elegir siempre el mercado de Ponches (K) como "best_method" solo porque suele tener líneas fáciles de superar. Este análisis es uno de varios que se hacen en el mismo día, y las casas de apuestas reales solo aceptan un número limitado de picks del mismo mercado por jugada combinada. Antes de finalizar "best_method", pregúntate: ¿es este mercado genuinamente el de mayor probabilidad para ESTE partido específico basado en los abridores y alineación de HOY, o es una elección por defecto/repetitiva? Si dos o más mercados tienen una probabilidad de acierto similar (diferencia menor a 5-8 puntos porcentuales), prioriza el que NO sea Ponches para mantener variedad natural entre los distintos mercados disponibles.
+- "alternative_method" DEBE ser un mercado distinto al de "best_method" (nunca repitas el mismo "market" en ambos campos), y debe representar una segunda opción razonable, no un relleno forzado — si genuinamente no hay una segunda opción sólida, elige el segundo mercado con mayor confianza aunque sea menor a la del "best_method".
+- Los campos "side", "line", "pick" y "spread" dentro de "best_method" y "alternative_method" son OBLIGATORIOS y deben coincidir exactamente con el mercado elegido en cada uno (usa null en los que no apliquen según la tabla del propio campo). Estos se usan para verificación automática de resultados, así que deben ser precisos y consistentes con el resto del análisis (por ejemplo, si "market" es "K" y el pick es sobre el equipo local, "side" debe ser "home" y "line" debe coincidir con la línea usada en strikeouts_home).
 - Todas las líneas numéricas (line, spread) deben ser realistas para MLB basadas en los datos reales proporcionados, no números genéricos repetidos.`;
 
     // 4. Call Groq API
@@ -394,7 +408,7 @@ REGLAS IMPORTANTES:
       },
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
-        max_tokens: 2500,
+        max_tokens: 2900,
         temperature: 0.3,
         messages: [
           {
