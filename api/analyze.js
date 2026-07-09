@@ -331,20 +331,20 @@ Responde SOLO con JSON sin markdown, estructura exacta:
   },
 
   "strikeouts_home": {
-    "line": "<decimal realista para EQUIPO COMPLETO (abridor + bullpen combinados en 9 innings), normalmente entre 7.5 y 10.5, ej 8.5>",
+    "line": <decimal realista para EQUIPO COMPLETO, abridor + bullpen combinados en 9 innings, normalmente entre 7.5 y 10.5, ej 8.5>,
     "pick": "<OVER|UNDER>",
     "confidence_pct": <entero 0-100>,
     "reasoning": "<ponches del EQUIPO LOCAL completo (abridor + bullpen), basado en K/9 general del staff vs tendencia de ponches del lineup visitante, 1 oración>",
-    "starter_line": "<decimal realista SOLO para el abridor probable local, normalmente entre 4.5 y 7.5, ej 5.5. Si no hay abridor confirmado, usa null>",
+    "starter_line": <decimal realista SOLO para el abridor probable local, normalmente entre 4.5 y 7.5, ej 5.5. Si no hay abridor confirmado, usa null>,
     "starter_pick": "<OVER|UNDER solo para el abridor. Si no hay abridor confirmado, usa null>"
   },
 
   "strikeouts_away": {
-    "line": "<decimal realista para EQUIPO COMPLETO (abridor + bullpen combinados en 9 innings), normalmente entre 7.5 y 10.5, ej 8.5>",
+    "line": <decimal realista para EQUIPO COMPLETO, abridor + bullpen combinados en 9 innings, normalmente entre 7.5 y 10.5, ej 8.5>,
     "pick": "<OVER|UNDER>",
     "confidence_pct": <entero 0-100>,
     "reasoning": "<ponches del EQUIPO VISITANTE completo (abridor + bullpen), basado en K/9 general del staff vs tendencia de ponches del lineup local, 1 oración>",
-    "starter_line": "<decimal realista SOLO para el abridor probable visitante, normalmente entre 4.5 y 7.5, ej 5.5. Si no hay abridor confirmado, usa null>",
+    "starter_line": <decimal realista SOLO para el abridor probable visitante, normalmente entre 4.5 y 7.5, ej 5.5. Si no hay abridor confirmado, usa null>,
     "starter_pick": "<OVER|UNDER solo para el abridor. Si no hay abridor confirmado, usa null>"
   },
 
@@ -426,9 +426,31 @@ REGLAS IMPORTANTES:
     });
 
     const groqData = await groqRes.json();
+
+    // If Groq itself returned an error (rate limit, invalid key, model overloaded, etc.),
+    // surface that real reason instead of failing confusingly at JSON.parse below.
+    if (!groqRes.ok || groqData.error) {
+      const groqErrorMsg = groqData.error?.message || `Groq respondió con estado ${groqRes.status}`;
+      console.error("Groq API error:", groqErrorMsg);
+      return res.status(502).json({
+        error: `Error de Groq AI: ${groqErrorMsg}`,
+        details: groqData.error?.type || "unknown",
+      });
+    }
+
     const text = groqData.choices?.[0]?.message?.content || "";
     const clean = text.replace(/```json|```/g, "").trim();
-    const analysis = JSON.parse(clean);
+
+    let analysis;
+    try {
+      analysis = JSON.parse(clean);
+    } catch (parseErr) {
+      console.error("JSON parse failed. Raw response (first 500 chars):", clean.slice(0, 500));
+      return res.status(502).json({
+        error: "La IA devolvió una respuesta incompleta o mal formada (posiblemente por límite de tokens). Intenta de nuevo.",
+        details: parseErr.message,
+      });
+    }
 
     // 5. Return combined data
     return res.status(200).json({
