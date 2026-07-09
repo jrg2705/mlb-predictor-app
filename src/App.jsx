@@ -87,9 +87,12 @@ function evaluateBestMethod(bestMethod, gameResult) {
       return side === gameResult.first5Winner;
     }
     case "K": {
+      // best_method's "K" market represents the STARTER's strikeouts specifically
+      // (sportsbooks only accept per-starter K picks), not the full team total.
       if (side !== "home" && side !== "away") return null;
       if (isNaN(line)) return null;
-      const actualK = side === "home" ? gameResult.homeStrikeoutsPitching : gameResult.awayStrikeoutsPitching;
+      const actualK = side === "home" ? gameResult.homeStarterStrikeouts : gameResult.awayStarterStrikeouts;
+      if (actualK === null || actualK === undefined) return null; // starter data unavailable, skip
       if (pick === "OVER") return actualK > line;
       if (pick === "UNDER") return actualK < line;
       return null;
@@ -241,7 +244,7 @@ const StatCard = ({ label, value, highlight }) => (
   </div>
 );
 
-const MarketCard = ({ icon, title, pick, line, confidence_pct, reasoning, pickColorYes, pickColorNo }) => {
+const MarketCard = ({ icon, title, pick, line, confidence_pct, reasoning, pickColorYes, pickColorNo, starterNote }) => {
   const isPositive = pick === "SI" || pick === "OVER";
   const pickColor = isPositive ? (pickColorYes || "#E63946") : (pickColorNo || "#2D6A4F");
   return (
@@ -256,6 +259,11 @@ const MarketCard = ({ icon, title, pick, line, confidence_pct, reasoning, pickCo
         )}
         <ConfidenceBadge pct={confidence_pct} />
       </div>
+      {starterNote && (
+        <p style={{ fontSize: "11px", color: "#F4A261", margin: "0 0 6px", fontWeight: 600 }}>
+          {starterNote}
+        </p>
+      )}
       <p style={{ fontSize: "12px", color: "#7a9ab8", margin: 0, lineHeight: 1.5, fontStyle: "italic" }}>
         {reasoning}
       </p>
@@ -277,6 +285,12 @@ const TabButton = ({ active, onClick, children }) => (
 
 export default function MLBPredictor() {
   const [showSplash, setShowSplash] = useState(true);
+
+  useEffect(() => {
+    const staticSplash = document.getElementById("initial-splash");
+    if (staticSplash) staticSplash.remove();
+  }, []);
+
   const [tab, setTab] = useState("predictor");
   const [home, setHome] = useState("");
   const [away, setAway] = useState("");
@@ -412,6 +426,7 @@ export default function MLBPredictor() {
         home: homeTeam,
         away: awayTeam,
         analysis: data.analysis,
+        gameContext: data.gameContext || null,
         gamePk: data.gameContext?.gamePk || null,
         verified: false,
       };
@@ -553,7 +568,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
     setAway(entry.away);
     setResult(entry.analysis);
     setRealStats(null);
-    setGameContext(null);
+    setGameContext(entry.gameContext || null);
     setTab("predictor");
   };
 
@@ -1008,6 +1023,33 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                 </div>
               )}
 
+              {result.alternative_method && (
+                <div style={{
+                  background: "linear-gradient(135deg, #1e3a52, #142235)", border: "1px solid #4A90D9",
+                  borderRadius: "12px", padding: "20px", marginBottom: "14px"
+                }}>
+                  <div style={{ fontSize: "11px", color: "#a8d1f0", letterSpacing: "0.15em", marginBottom: "8px" }}>
+                    🥈 MÉTODO ALTERNATIVO
+                  </div>
+                  <div style={{ fontSize: "18px", fontWeight: 900, color: "#fff", marginBottom: "6px" }}>
+                    {result.alternative_method.pick_summary}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px", flexWrap: "wrap" }}>
+                    <span style={{
+                      background: "rgba(255,255,255,0.15)", color: "#fff", borderRadius: "10px",
+                      padding: "2px 10px", fontSize: "11px", fontWeight: 700,
+                    }}>
+                      {{ JC: "Juego Completo", H: "First 5 Innings", K: "Ponches", Solo: "Carreras Individuales",
+                         SI_NO: "1er Inning SI/NO", HCE: "Carreras+Hits+Errores", Linea: "Total Carreras", RL: "Run Line" }[result.alternative_method.market] || result.alternative_method.market}
+                    </span>
+                    <ConfidenceBadge pct={result.alternative_method.confidence_pct} />
+                  </div>
+                  <p style={{ fontSize: "12px", color: "#c5d8ea", margin: 0, lineHeight: 1.5, fontStyle: "italic" }}>
+                    {result.alternative_method.reasoning}
+                  </p>
+                </div>
+              )}
+
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
                 <MarketCard
                   icon="🎯" title="1ER INNING (SI/NO)"
@@ -1082,6 +1124,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                     line={result.strikeouts_home.line}
                     confidence_pct={result.strikeouts_home.confidence_pct}
                     reasoning={result.strikeouts_home.reasoning}
+                    starterNote={result.strikeouts_home.starter_line ? `Abridor: ${result.strikeouts_home.starter_pick} ${result.strikeouts_home.starter_line}` : null}
                     pickColorYes="#F4A261" pickColorNo="#4A90D9"
                   />
                 )}
@@ -1092,6 +1135,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                     line={result.strikeouts_away.line}
                     confidence_pct={result.strikeouts_away.confidence_pct}
                     reasoning={result.strikeouts_away.reasoning}
+                    starterNote={result.strikeouts_away.starter_line ? `Abridor: ${result.strikeouts_away.starter_pick} ${result.strikeouts_away.starter_line}` : null}
                     pickColorYes="#F4A261" pickColorNo="#4A90D9"
                   />
                 )}
