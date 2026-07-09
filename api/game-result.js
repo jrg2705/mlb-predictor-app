@@ -45,9 +45,24 @@ async function fetchGameResult(gamePk) {
     const homeErrors = homeFielding.errors ?? 0;
     const awayErrors = awayFielding.errors ?? 0;
 
-    // Strikeouts a team's PITCHING recorded (i.e., batters they struck out) — this is the "K a favor" the user wants
+    // Strikeouts a team's PITCHING recorded (i.e., batters they struck out) — full team total
     const homeStrikeoutsPitching = homePitching.strikeOuts ?? 0;
     const awayStrikeoutsPitching = awayPitching.strikeOuts ?? 0;
+
+    // Starter-specific strikeouts: find the starting pitcher in the boxscore player list
+    // and read their individual strikeout count (gameStatus.isStarter or first pitcher in pitching order).
+    const extractStarterStrikeouts = (teamData) => {
+      const players = teamData?.players || {};
+      const pitchers = teamData?.pitchers || []; // array of player IDs in the order they pitched
+      if (!pitchers.length) return null;
+      const starterId = pitchers[0];
+      const starter = players[`ID${starterId}`];
+      const k = starter?.stats?.pitching?.strikeOuts;
+      return k !== undefined ? k : null;
+    };
+
+    const homeStarterStrikeouts = extractStarterStrikeouts(boxscore?.teams?.home);
+    const awayStarterStrikeouts = extractStarterStrikeouts(boxscore?.teams?.away);
 
     // First inning: did EITHER team score (combined) in the top or bottom of inning 1?
     const innings = linescore?.innings || [];
@@ -79,6 +94,8 @@ async function fetchGameResult(gamePk) {
       totalHitsErrorsRuns: homeRuns + awayRuns + homeHits + awayHits + homeErrors + awayErrors,
       homeStrikeoutsPitching,
       awayStrikeoutsPitching,
+      homeStarterStrikeouts,
+      awayStarterStrikeouts,
       firstInningScored,
       homeThrough5,
       awayThrough5,
