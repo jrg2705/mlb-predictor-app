@@ -595,6 +595,83 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
     HCE: "Carreras+Hits+Errores", Linea: "Total Carreras", RL: "Run Line",
   };
 
+  const handleExportToday = () => {
+    if (todayAnalyzed.length === 0) return;
+
+    const lines = [
+      "=".repeat(50),
+      "MLB PREDICTOR — ANÁLISIS DEL DÍA",
+      new Date().toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "long", year: "numeric" }),
+      "=".repeat(50),
+      "",
+    ];
+
+    todayAnalyzed.forEach((entry, idx) => {
+      const a = entry.analysis;
+      lines.push(`--- PARTIDO ${idx + 1}: ${entry.away} @ ${entry.home} ---`);
+      lines.push(`Hora del análisis: ${new Date(entry.date).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" })}`);
+      lines.push(`Moneyline: ${entry.away} ${a.away_win_pct}% | ${entry.home} ${a.home_win_pct}%`);
+      lines.push("");
+
+      if (a.best_method) {
+        lines.push(`🏆 MEJOR MÉTODO: ${a.best_method.pick_summary}`);
+        lines.push(`   Mercado: ${METHOD_LABELS[a.best_method.market] || a.best_method.market} | Confianza: ${a.best_method.confidence_pct}%`);
+        lines.push(`   ${a.best_method.reasoning}`);
+        lines.push("");
+      }
+      if (a.alternative_method) {
+        lines.push(`🥈 ALTERNATIVA: ${a.alternative_method.pick_summary}`);
+        lines.push(`   Mercado: ${METHOD_LABELS[a.alternative_method.market] || a.alternative_method.market} | Confianza: ${a.alternative_method.confidence_pct}%`);
+        lines.push(`   ${a.alternative_method.reasoning}`);
+        lines.push("");
+      }
+
+      lines.push(`1er Inning SI/NO: ${a.first_inning?.scores} (${a.first_inning?.confidence_pct}%)`);
+      lines.push(`Total carreras: ${a.total_runs?.pick} ${a.total_runs?.line} (${a.total_runs?.confidence_pct}%)`);
+      lines.push(`Carreras ${entry.home}: ${a.home_team_runs?.pick} ${a.home_team_runs?.line} (${a.home_team_runs?.confidence_pct}%)`);
+      lines.push(`Carreras ${entry.away}: ${a.away_team_runs?.pick} ${a.away_team_runs?.line} (${a.away_team_runs?.confidence_pct}%)`);
+      if (a.first_five_innings) {
+        lines.push(`First 5 Innings: gana ${a.first_five_innings.winner === "home" ? entry.home : entry.away} (${a.first_five_innings.confidence_pct}%)`);
+      }
+      if (a.run_line) {
+        lines.push(`Run Line (${a.run_line.spread}): ${a.run_line.favored_team === "home" ? entry.home : entry.away} — ${a.run_line.covers === "SI" ? "cubre" : "no cubre"} (${a.run_line.confidence_pct}%)`);
+      }
+      if (a.strikeouts_home) lines.push(`Ponches ${entry.home}: ${a.strikeouts_home.pick} ${a.strikeouts_home.line} (${a.strikeouts_home.confidence_pct}%)`);
+      if (a.strikeouts_away) lines.push(`Ponches ${entry.away}: ${a.strikeouts_away.pick} ${a.strikeouts_away.line} (${a.strikeouts_away.confidence_pct}%)`);
+      if (a.hce_total) lines.push(`Carreras+Hits+Errores: ${a.hce_total.pick} ${a.hce_total.line} (${a.hce_total.confidence_pct}%)`);
+
+      lines.push("");
+      lines.push(`Pitching: ${a.pitching_edge}`);
+      lines.push(`Bullpen: ${a.bullpen_risk}`);
+      lines.push(`Bateo: ${a.batting_edge}`);
+      lines.push(`H2H: ${a.h2h_note}`);
+      lines.push(`Análisis final: ${a.analyst_take}`);
+
+      if (entry.verified) {
+        lines.push("");
+        lines.push(`RESULTADO REAL: ${entry.actualScore} — Mejor Método: ${entry.bestMethodCorrect === null ? "No verificable" : entry.bestMethodCorrect ? "✅ Acertó" : "❌ Falló"}`);
+      }
+
+      lines.push("");
+      lines.push("-".repeat(50));
+      lines.push("");
+    });
+
+    lines.push(`Total de partidos exportados: ${todayAnalyzed.length}`);
+    lines.push("Generado por MLB Predictor · MLB Stats API + Groq AI");
+
+    const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const dateStr = new Date().toISOString().split("T")[0];
+    a.href = url;
+    a.download = `mlb-predictor-${dateStr}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   // Max picks allowed from the same market in a single Top Picks generation —
   // mirrors typical sportsbook combined-parlay restrictions (4-5 per market).
   const MAX_PER_MARKET = 5;
@@ -1149,16 +1226,26 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
 
       {tab === "history" && (
         <div style={{ maxWidth: "680px", margin: "0 auto", animation: "fadeIn .4s ease" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "8px" }}>
             <h2 style={{ fontSize: "16px", margin: 0, color: "#F0F4F8" }}>🕓 Historial de Predicciones</h2>
-            {history.length > 0 && (
-              <button onClick={handleClearHistory} style={{
-                background: "transparent", border: "1px solid #c0392b", color: "#c0392b",
-                borderRadius: "6px", padding: "6px 12px", fontSize: "11px", cursor: "pointer",
-              }}>
-                🗑️ Borrar todo
-              </button>
-            )}
+            <div style={{ display: "flex", gap: "8px" }}>
+              {todayAnalyzed.length > 0 && (
+                <button onClick={handleExportToday} style={{
+                  background: "#142235", border: "1px solid #2D6A4F", color: "#2D6A4F",
+                  borderRadius: "6px", padding: "6px 12px", fontSize: "11px", cursor: "pointer", fontWeight: 600,
+                }}>
+                  📄 Exportar análisis de hoy
+                </button>
+              )}
+              {history.length > 0 && (
+                <button onClick={handleClearHistory} style={{
+                  background: "transparent", border: "1px solid #c0392b", color: "#c0392b",
+                  borderRadius: "6px", padding: "6px 12px", fontSize: "11px", cursor: "pointer",
+                }}>
+                  🗑️ Borrar todo
+                </button>
+              )}
+            </div>
           </div>
 
           <p style={{ fontSize: "11px", color: "#3a5a78", marginBottom: "16px" }}>
