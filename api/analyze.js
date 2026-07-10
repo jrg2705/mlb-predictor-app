@@ -214,6 +214,40 @@ async function fetchLineupIfAvailable(gamePk) {
   }
 }
 
+// Calls Groq with automatic failover: if the primary key hits a rate limit (HTTP 429),
+// automatically retries once using the secondary key (GROQ_API_KEY_2), if configured.
+async function callGroqWithFailover(payload) {
+  const primaryKey = process.env.GROQ_API_KEY;
+  const secondaryKey = process.env.GROQ_API_KEY_2;
+
+  const attempt = async (apiKey) => {
+    const res = await fetch(GROQ_API, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    return { res, data };
+  };
+
+  const first = await attempt(primaryKey);
+
+  // Only fail over on rate limit (429) — other errors (bad request, model issue) would
+  // fail the same way on the second key, so no point retrying those.
+  const isRateLimited = first.res.status === 429 || first.data?.error?.code === "rate_limit_exceeded";
+
+  if (isRateLimited && secondaryKey) {
+    console.log("Groq primary key rate-limited — retrying with secondary key");
+    const second = await attempt(secondaryKey);
+    return { ...second, usedFailover: true };
+  }
+
+  return { ...first, usedFailover: false };
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -331,23 +365,17 @@ Responde SOLO con JSON sin markdown, estructura exacta:
   },
 
   "strikeouts_home": {
-    "line": <decimal realista para EQUIPO COMPLETO, abridor + bullpen combinados en 9 innings, normalmente entre 7.5 y 10.5, ej 8.5>,
-    "pick": "<OVER|UNDER>",
-    "confidence_pct": <entero 0-100>,
-    "reasoning": "<ponches del EQUIPO LOCAL completo (abridor + bullpen), basado en K/9 general del staff vs tendencia de ponches del lineup visitante, 1 oración>",
-    "starter_line": <decimal realista SOLO para el abridor probable local, normalmente entre 4.5 y 7.5, ej 5.5. Si no hay abridor confirmado, usa null>,
-    "starter_pick": "<OVER|UNDER solo para el abridor. Si no hay abridor confirmado, usa null>",
-    "starter_confidence_pct": <entero 0-100 de confianza SOLO para el pick del abridor (puede ser distinto al confidence_pct del equipo completo). Si no hay abridor confirmado, usa null>
+    "line": <decimal realista SOLO para el abridor probable local, normalmente entre 4.5 y 7.5, ej 5.5. Si no hay abridor confirmado, usa null>,
+    "pick": "<OVER|UNDER solo para el abridor. Si no hay abridor confirmado, usa null>",
+    "confidence_pct": <entero 0-100 de confianza para el pick del abridor. Si no hay abridor confirmado, usa null>,
+    "reasoning": "<ponches del ABRIDOR PROBABLE local, basado en su K/9 individual vs tendencia de ponches del lineup visitante, 1 oración. Si no hay abridor confirmado, indica que no se puede proyectar>"
   },
 
   "strikeouts_away": {
-    "line": <decimal realista para EQUIPO COMPLETO, abridor + bullpen combinados en 9 innings, normalmente entre 7.5 y 10.5, ej 8.5>,
-    "pick": "<OVER|UNDER>",
-    "confidence_pct": <entero 0-100>,
-    "reasoning": "<ponches del EQUIPO VISITANTE completo (abridor + bullpen), basado en K/9 general del staff vs tendencia de ponches del lineup local, 1 oración>",
-    "starter_line": <decimal realista SOLO para el abridor probable visitante, normalmente entre 4.5 y 7.5, ej 5.5. Si no hay abridor confirmado, usa null>,
-    "starter_pick": "<OVER|UNDER solo para el abridor. Si no hay abridor confirmado, usa null>",
-    "starter_confidence_pct": <entero 0-100 de confianza SOLO para el pick del abridor (puede ser distinto al confidence_pct del equipo completo). Si no hay abridor confirmado, usa null>
+    "line": <decimal realista SOLO para el abridor probable visitante, normalmente entre 4.5 y 7.5, ej 5.5. Si no hay abridor confirmado, usa null>,
+    "pick": "<OVER|UNDER solo para el abridor. Si no hay abridor confirmado, usa null>",
+    "confidence_pct": <entero 0-100 de confianza para el pick del abridor. Si no hay abridor confirmado, usa null>,
+    "reasoning": "<ponches del ABRIDOR PROBABLE visitante, basado en su K/9 individual vs tendencia de ponches del lineup local, 1 oración. Si no hay abridor confirmado, indica que no se puede proyectar>"
   },
 
   "hce_total": {
@@ -400,34 +428,29 @@ Responde SOLO con JSON sin markdown, estructura exacta:
 REGLAS IMPORTANTES:
 - home_win_pct + away_win_pct = 100 exactamente.
 - "best_method" es el campo MÁS IMPORTANTE para el sistema de picks: evalúa los 8 métodos disponibles (JC=juego completo, H=first 5 innings, K=ponches del ABRIDOR probable de un equipo (no del equipo completo), Solo=carreras de un equipo específico, SI_NO=anotación combinada en el 1er inning, HCE=total carreras+hits+errores combinado, Linea=total carreras combinado, RL=run line con spread) y elige el que consideres tiene MAYOR probabilidad real de acierto para este partido específico — no siempre debe ser el ganador del juego completo.
-- IMPORTANTE: si eliges "K" como "best_method" o "alternative_method", el campo "line", "pick" y "confidence_pct" DEBEN corresponder al abridor probable específico (usa los mismos valores que "starter_line", "starter_pick" y "starter_confidence_pct" del campo strikeouts_home/strikeouts_away correspondiente), NO al total del equipo completo. Esto es un requisito de las casas de apuestas que solo aceptan picks de ponches por abridor individual. Si no hay abridor confirmado para ese equipo, no elijas "K" como mercado.
+- IMPORTANTE: si eliges "K" como "best_method" o "alternative_method", el campo "line", "pick" y "confidence_pct" DEBEN coincidir exactamente con los del campo strikeouts_home/strikeouts_away correspondiente (que ya representan al abridor probable específico). Esto es un requisito de las casas de apuestas que solo aceptan picks de ponches por abridor individual. Si no hay abridor confirmado para ese equipo (line es null), no elijas "K" como mercado.
 - IMPORTANTE SOBRE VARIEDAD: evita el sesgo de elegir siempre el mercado de Ponches (K) como "best_method" solo porque suele tener líneas fáciles de superar. Este análisis es uno de varios que se hacen en el mismo día, y las casas de apuestas reales solo aceptan un número limitado de picks del mismo mercado por jugada combinada. Antes de finalizar "best_method", pregúntate: ¿es este mercado genuinamente el de mayor probabilidad para ESTE partido específico basado en los abridores y alineación de HOY, o es una elección por defecto/repetitiva? Si dos o más mercados tienen una probabilidad de acierto similar (diferencia menor a 5-8 puntos porcentuales), prioriza el que NO sea Ponches para mantener variedad natural entre los distintos mercados disponibles.
 - "alternative_method" DEBE ser un mercado distinto al de "best_method" (nunca repitas el mismo "market" en ambos campos), y debe representar una segunda opción razonable, no un relleno forzado — si genuinamente no hay una segunda opción sólida, elige el segundo mercado con mayor confianza aunque sea menor a la del "best_method".
 - Los campos "side", "line", "pick" y "spread" dentro de "best_method" y "alternative_method" son OBLIGATORIOS y deben coincidir exactamente con el mercado elegido en cada uno (usa null en los que no apliquen según la tabla del propio campo). Estos se usan para verificación automática de resultados, así que deben ser precisos y consistentes con el resto del análisis (por ejemplo, si "market" es "K" y el pick es sobre el equipo local, "side" debe ser "home" y "line" debe coincidir con la línea usada en strikeouts_home).
 - Todas las líneas numéricas (line, spread) deben ser realistas para MLB basadas en los datos reales proporcionados, no números genéricos repetidos.`;
 
-    // 4. Call Groq API
-    const groqRes = await fetch(GROQ_API, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        max_tokens: 3200,
-        temperature: 0.3,
-        messages: [
-          {
-            role: "system",
-            content: "Eres un analista experto de béisbol MLB. Priorizas datos específicos del día (abridores confirmados, alineación) sobre promedios generales de temporada cuando están disponibles. Responde siempre con JSON válido únicamente, sin texto adicional ni markdown.",
-          },
-          { role: "user", content: prompt },
-        ],
-      }),
+    // 4. Call Groq API (with automatic failover to a second key if rate-limited)
+    const { res: groqRes, data: groqData, usedFailover } = await callGroqWithFailover({
+      model: "llama-3.3-70b-versatile",
+      max_tokens: 2900,
+      temperature: 0.3,
+      messages: [
+        {
+          role: "system",
+          content: "Eres un analista experto de béisbol MLB. Priorizas datos específicos del día (abridores confirmados, alineación) sobre promedios generales de temporada cuando están disponibles. Responde siempre con JSON válido únicamente, sin texto adicional ni markdown.",
+        },
+        { role: "user", content: prompt },
+      ],
     });
 
-    const groqData = await groqRes.json();
+    if (usedFailover) {
+      console.log("Analysis completed using secondary Groq key (primary was rate-limited)");
+    }
 
     // If Groq itself returned an error (rate limit, invalid key, model overloaded, etc.),
     // surface that real reason instead of failing confusingly at JSON.parse below.
