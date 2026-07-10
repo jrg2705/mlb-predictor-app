@@ -651,13 +651,11 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
       if (a.run_line) {
         lines.push(`Run Line (${a.run_line.spread}): ${a.run_line.favored_team === "home" ? entry.home : entry.away} — ${a.run_line.covers === "SI" ? "cubre" : "no cubre"} (${a.run_line.confidence_pct}%)`);
       }
-      if (a.strikeouts_home) {
-        lines.push(`Ponches ${entry.home} (equipo): ${a.strikeouts_home.pick} ${a.strikeouts_home.line} (${a.strikeouts_home.confidence_pct}%)`);
-        if (a.strikeouts_home.starter_line) lines.push(`  → Abridor: ${a.strikeouts_home.starter_pick} ${a.strikeouts_home.starter_line} (${a.strikeouts_home.starter_confidence_pct}%)`);
+      if (a.strikeouts_home?.line != null) {
+        lines.push(`Ponches Abridor ${entry.home}: ${a.strikeouts_home.pick} ${a.strikeouts_home.line} (${a.strikeouts_home.confidence_pct}%)`);
       }
-      if (a.strikeouts_away) {
-        lines.push(`Ponches ${entry.away} (equipo): ${a.strikeouts_away.pick} ${a.strikeouts_away.line} (${a.strikeouts_away.confidence_pct}%)`);
-        if (a.strikeouts_away.starter_line) lines.push(`  → Abridor: ${a.strikeouts_away.starter_pick} ${a.strikeouts_away.starter_line} (${a.strikeouts_away.starter_confidence_pct}%)`);
+      if (a.strikeouts_away?.line != null) {
+        lines.push(`Ponches Abridor ${entry.away}: ${a.strikeouts_away.pick} ${a.strikeouts_away.line} (${a.strikeouts_away.confidence_pct}%)`);
       }
       if (a.hce_total) lines.push(`Carreras+Hits+Errores: ${a.hce_total.pick} ${a.hce_total.line} (${a.hce_total.confidence_pct}%)`);
 
@@ -1123,25 +1121,23 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                     </p>
                   </div>
                 )}
-                {result.strikeouts_home && (
+                {result.strikeouts_home?.line != null && (
                   <MarketCard
-                    icon="🔥" title={`PONCHES — ${home}`}
+                    icon="🔥" title={`PONCHES ABRIDOR — ${home}`}
                     pick={result.strikeouts_home.pick}
                     line={result.strikeouts_home.line}
                     confidence_pct={result.strikeouts_home.confidence_pct}
                     reasoning={result.strikeouts_home.reasoning}
-                    starterNote={result.strikeouts_home.starter_line ? `Abridor: ${result.strikeouts_home.starter_pick} ${result.strikeouts_home.starter_line} (${result.strikeouts_home.starter_confidence_pct}% confianza)` : null}
                     pickColorYes="#F4A261" pickColorNo="#4A90D9"
                   />
                 )}
-                {result.strikeouts_away && (
+                {result.strikeouts_away?.line != null && (
                   <MarketCard
-                    icon="🔥" title={`PONCHES — ${away}`}
+                    icon="🔥" title={`PONCHES ABRIDOR — ${away}`}
                     pick={result.strikeouts_away.pick}
                     line={result.strikeouts_away.line}
                     confidence_pct={result.strikeouts_away.confidence_pct}
                     reasoning={result.strikeouts_away.reasoning}
-                    starterNote={result.strikeouts_away.starter_line ? `Abridor: ${result.strikeouts_away.starter_pick} ${result.strikeouts_away.starter_line} (${result.strikeouts_away.starter_confidence_pct}% confianza)` : null}
                     pickColorYes="#F4A261" pickColorNo="#4A90D9"
                   />
                 )}
