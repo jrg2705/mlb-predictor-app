@@ -214,6 +214,102 @@ async function fetchLineupIfAvailable(gamePk) {
   }
 }
 
+// Weather is available pre-game (hours before first pitch) via the live feed endpoint.
+// Returns condition, temperature, and wind — useful for run-scoring context
+// (e.g. wind blowing out favors offense, domes have no weather impact).
+async function fetchWeather(gamePk) {
+  if (!gamePk) return null;
+  try {
+    const res = await fetch(`${MLB_BASE}/game/${gamePk}/feed/live`);
+    const data = await res.json();
+    const weather = data?.gameData?.weather;
+    if (!weather || !weather.condition) return null;
+    return {
+      condition: weather.condition || null,
+      temp: weather.temp || null,
+      wind: weather.wind || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Bullpen fatigue: checks each team's last 3 days of games to see which relievers
+// have pitched recently, as a proxy for bullpen availability/tiredness today.
+async function fetchBullpenFatigue(teamId) {
+  try {
+    const today = new Date();
+    const startDate = new Date(today);
+    startDate.setDate(startDate.getDate() - 3);
+    const fmt = (d) => d.toISOString().split("T")[0];
+
+    const scheduleRes = await fetch(
+      `${MLB_BASE}/schedule?sportId=1&teamId=${teamId}&startDate=${fmt(startDate)}&endDate=${fmt(today)}&gameType=R`
+    );
+    const scheduleData = await scheduleRes.json();
+    const recentGames = (scheduleData?.dates?.flatMap(d => d.games) || [])
+      .filter(g => g.status?.abstractGameState === "Final");
+
+    if (recentGames.length === 0) {
+      return { gamesLastThreeDays: 0, relieversUsedRecently: 0, note: "Sin juegos recientes registrados" };
+    }
+
+    // Count distinct relief pitchers used across those recent games for this team
+    const usedPitcherIds = new Set();
+    await Promise.all(recentGames.slice(0, 3).map(async (g) => {
+      try {
+        const boxRes = await fetch(`${MLB_BASE}/game/${g.gamePk}/boxscore`);
+        const boxData = await boxRes.json();
+        const isHome = g.teams?.home?.team?.id === teamId;
+        const teamBox = isHome ? boxData?.teams?.home : boxData?.teams?.away;
+        const pitchers = teamBox?.pitchers || [];
+        // Skip index 0 (starter) — we only care about relievers for fatigue
+        pitchers.slice(1).forEach(pid => usedPitcherIds.add(pid));
+      } catch {
+        // skip this game's boxscore if it fails
+      }
+    }));
+
+    return {
+      gamesLastThreeDays: recentGames.length,
+      relieversUsedRecently: usedPitcherIds.size,
+      note: usedPitcherIds.size >= 5
+        ? "Bullpen con uso intenso en los últimos 3 días, posible fatiga"
+        : "Bullpen con carga de trabajo normal en los últimos 3 días",
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Injury context: compares the 40-man roster (includes injured list players) against
+// the active roster to identify which notable players are currently unavailable.
+async function fetchInjuryContext(teamId) {
+  try {
+    const season = new Date().getFullYear();
+    const [activeRes, fullRosterRes] = await Promise.all([
+      fetch(`${MLB_BASE}/teams/${teamId}/roster?rosterType=active&season=${season}`),
+      fetch(`${MLB_BASE}/teams/${teamId}/roster?rosterType=40Man&season=${season}`),
+    ]);
+    const activeData = await activeRes.json();
+    const fullData = await fullRosterRes.json();
+
+    const activeIds = new Set((activeData?.roster || []).map(p => p.person?.id));
+    const injuredOrUnavailable = (fullData?.roster || [])
+      .filter(p => !activeIds.has(p.person?.id) && p.status?.description)
+      .map(p => ({
+        name: p.person?.fullName,
+        position: p.position?.abbreviation,
+        status: p.status?.description,
+      }))
+      .filter(p => p.status && p.status.toLowerCase().includes("injured"));
+
+    return injuredOrUnavailable.slice(0, 8); // cap to avoid bloating the prompt
+  } catch {
+    return [];
+  }
+}
+
 // Calls Groq with automatic failover: if the primary key hits a rate limit (HTTP 429),
 // automatically retries once using the secondary key (GROQ_API_KEY_2), if configured.
 async function callGroqWithFailover(payload) {
@@ -398,17 +494,23 @@ export default async function handler(req, res) {
       fetchUpcomingGameInfo(homeId, awayId, requestedGamePk),
     ]);
 
-    // 2. Fetch probable pitcher stats (if known) + lineup (if published)
-    let homePitcher = null, awayPitcher = null, lineup = null;
+    // 2. Fetch probable pitcher stats (if known) + lineup (if published) + weather + bullpen fatigue + injuries
+    let homePitcher = null, awayPitcher = null, lineup = null, weather = null;
+    const [hp, ap, lu, wx, homeFatigue, awayFatigue, homeInjuries, awayInjuries] = await Promise.all([
+      gameInfo ? fetchPitcherStats(gameInfo.homeProbablePitcher?.id) : null,
+      gameInfo ? fetchPitcherStats(gameInfo.awayProbablePitcher?.id) : null,
+      gameInfo ? fetchLineupIfAvailable(gameInfo.gamePk) : null,
+      gameInfo ? fetchWeather(gameInfo.gamePk) : null,
+      fetchBullpenFatigue(homeId),
+      fetchBullpenFatigue(awayId),
+      fetchInjuryContext(homeId),
+      fetchInjuryContext(awayId),
+    ]);
     if (gameInfo) {
-      const [hp, ap, lu] = await Promise.all([
-        fetchPitcherStats(gameInfo.homeProbablePitcher?.id),
-        fetchPitcherStats(gameInfo.awayProbablePitcher?.id),
-        fetchLineupIfAvailable(gameInfo.gamePk),
-      ]);
       homePitcher = hp ? { name: gameInfo.homeProbablePitcher?.fullName, ...hp } : null;
       awayPitcher = ap ? { name: gameInfo.awayProbablePitcher?.fullName, ...ap } : null;
       lineup = lu;
+      weather = wx;
     }
 
     // 3. Build prompt — prioritize starting pitcher data when available
@@ -432,6 +534,27 @@ Usa esta alineación real para evaluar la fortaleza ofensiva específica de hoy,
 NOTA: La alineación titular de hoy aún no ha sido publicada por la MLB (normalmente se confirma 1-3 horas antes del primer lanzamiento). El análisis ofensivo se basa en el roster completo de la temporada.
 `;
 
+    const weatherBlock = weather ? `
+CLIMA DEL ESTADIO: ${weather.condition}${weather.temp ? `, ${weather.temp}°F` : ""}${weather.wind ? `, viento: ${weather.wind}` : ""}
+Considera el impacto del clima en el juego: viento soplando hacia afuera o temperaturas altas suelen favorecer más carreras/jonrones; viento en contra, frío, o estadios techados reducen la ofensiva.
+` : `
+NOTA: Clima no disponible aún para este partido.
+`;
+
+    const fatigueBlock = `
+FATIGA DE BULLPEN (últimos 3 días):
+- ${home}: ${homeFatigue?.relieversUsedRecently ?? "N/A"} relevistas distintos usados — ${homeFatigue?.note || "sin datos"}
+- ${away}: ${awayFatigue?.relieversUsedRecently ?? "N/A"} relevistas distintos usados — ${awayFatigue?.note || "sin datos"}
+Un bullpen con muchos relevistas usados recientemente tiene mayor riesgo de fatiga y blown saves hoy.
+`;
+
+    const injuryBlock = (homeInjuries.length > 0 || awayInjuries.length > 0) ? `
+JUGADORES EN LISTA DE LESIONADOS (pueden afectar el rendimiento del equipo):
+- ${home}: ${homeInjuries.length > 0 ? homeInjuries.map(p => `${p.name} (${p.position}, ${p.status})`).join(", ") : "Ninguno relevante detectado"}
+- ${away}: ${awayInjuries.length > 0 ? awayInjuries.map(p => `${p.name} (${p.position}, ${p.status})`).join(", ") : "Ninguno relevante detectado"}
+Considera si alguno de estos jugadores es una pieza clave (abridor, bateador regular) cuya ausencia debilite al equipo.
+` : "";
+
     const prompt = `Eres un analista experto de MLB. Analiza el partido entre ${away} (visitante) vs ${home} (local).
 
 DATOS REALES DE LA TEMPORADA ${new Date().getFullYear()} (MLB Stats API):
@@ -449,7 +572,7 @@ EQUIPO VISITANTE — ${away}:
 - Bullpen: Salvamentos ${awayStats.saves} | Blown Saves ${awayStats.blownSaves}
 
 HEAD-TO-HEAD (temporada actual): ${home} ${h2h.homeWins}W - ${h2h.awayWins}W ${away} (${h2h.totalGames} juegos)
-${pitcherBlock}${lineupBlock}
+${pitcherBlock}${lineupBlock}${weatherBlock}${fatigueBlock}${injuryBlock}
 
 Responde SOLO con JSON sin markdown, estructura exacta:
 
@@ -547,7 +670,7 @@ Responde SOLO con JSON sin markdown, estructura exacta:
   "bullpen_risk": "<riesgo bullpen, 1 oración>",
   "batting_edge": "<ventaja bateo, usando alineación titular si está disponible, 1 oración>",
   "h2h_note": "<nota head-to-head, 1 oración>",
-  "data_confidence_note": "<indica si el análisis usó abridores confirmados y/o alineación real, o si fue con datos generales del equipo, 1 oración>",
+  "data_confidence_note": "<indica si el análisis usó abridores confirmados, alineación real, clima, fatiga de bullpen y/o datos de lesiones, o si fue con datos generales del equipo, 1 oración>",
   "analyst_take": "<conclusión final, 2 oraciones>"
 }
 
@@ -621,6 +744,9 @@ REGLAS IMPORTANTES:
         homePitcher,
         awayPitcher,
         lineup,
+        weather,
+        bullpenFatigue: { home: homeFatigue, away: awayFatigue },
+        injuries: { home: homeInjuries, away: awayInjuries },
         gameDate: gameInfo?.gameDate || null,
         gamePk: gameInfo?.gamePk || null,
       },
