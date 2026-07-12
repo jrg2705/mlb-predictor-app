@@ -527,11 +527,12 @@ export default function MLBPredictor() {
       setNewsResult({ newsFound: data.newsFound, newsUsed: data.newsUsed || [], message: data.message });
       setResult(data.analysis); // updated analysis (or unchanged, if no relevant news)
 
-      // Keep history entry in sync with the potentially updated analysis
+      // Keep history entry in sync with the potentially updated analysis AND the news used,
+      // so returning from History later still shows what news influenced the pick.
       setHistory(prevHistory => {
         const updated = prevHistory.map(e =>
           e.home === home && e.away === away && new Date(e.date).toDateString() === new Date().toDateString()
-            ? { ...e, analysis: data.analysis }
+            ? { ...e, analysis: data.analysis, newsUsed: data.newsUsed || [] }
             : e
         );
         localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
@@ -612,6 +613,8 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
     setRealStats(null);
     setGameContext(entry.gameContext || null);
     setIsFreshAnalysis(false);
+    setNewsResult(entry.newsUsed?.length > 0 ? { newsFound: true, newsUsed: entry.newsUsed } : null);
+    setNewsError("");
     setTab("predictor");
   };
 
@@ -728,6 +731,43 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
     const dateStr = new Date().toISOString().split("T")[0];
     a.href = url;
     a.download = `mlb-predictor-${dateStr}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportPicks = () => {
+    if (!generatedPicks || generatedPicks.length === 0) return;
+
+    const today = new Date();
+    const dateStr = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
+
+    const lines = [
+      "=".repeat(50),
+      "MLB PREDICTOR — TOP PICKS DEL DÍA",
+      today.toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "long", year: "numeric" }),
+      `Cantidad de picks: ${generatedPicks.length}`,
+      "=".repeat(50),
+      "",
+    ];
+
+    generatedPicks.forEach(({ entry, marketLabel, pickSummary, confidence, usedAlternative, overCap }, idx) => {
+      lines.push(`${idx + 1}. ${entry.away} @ ${entry.home}`);
+      lines.push(`   Mercado: ${marketLabel}${usedAlternative ? " (alternativa)" : ""}${overCap ? " (sobre límite)" : ""}`);
+      lines.push(`   Pick: ${pickSummary}`);
+      lines.push(`   Confianza: ${confidence}%`);
+      lines.push("");
+    });
+
+    lines.push("-".repeat(50));
+    lines.push("Generado por MLB Predictor · MLB Stats API + Groq AI");
+
+    const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `mlb_picks_${generatedPicks.length}_${dateStr}.txt`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -1629,7 +1669,16 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
               </div>
 
               {generatedPicks && generatedPicks.length > 0 && (
-                <div style={{ display: "flex", flexDirection: "column", gap: "10px", animation: "fadeIn .4s ease" }}>
+                <>
+                  <div style={{ textAlign: "right", marginBottom: "12px" }}>
+                    <button onClick={handleExportPicks} style={{
+                      background: "#142235", border: "1px solid #2D6A4F", color: "#2D6A4F",
+                      borderRadius: "6px", padding: "6px 12px", fontSize: "11px", cursor: "pointer", fontWeight: 600,
+                    }}>
+                      📄 Exportar Picks
+                    </button>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "10px", animation: "fadeIn .4s ease" }}>
                   {generatedPicks.map(({ entry, marketLabel, pickSummary, confidence, usedAlternative, overCap }, idx) => (
                     <div key={entry.id} style={{
                       background: "linear-gradient(135deg, #142235, #16314a)", border: "1px solid #2D6A4F",
@@ -1653,7 +1702,8 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                       <ConfidenceBadge pct={confidence} />
                     </div>
                   ))}
-                </div>
+                  </div>
+                </>
               )}
             </>
           )}
