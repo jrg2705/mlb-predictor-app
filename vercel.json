@@ -4,7 +4,7 @@
   "framework": "vite",
   "functions": {
     "api/analyze.js": {
-      "maxDuration": 30
+      "maxDuration": 45
     },
     "api/game-result.js": {
       "maxDuration": 30
