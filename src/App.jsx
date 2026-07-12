@@ -695,6 +695,75 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
   // mirrors typical sportsbook combined-parlay restrictions.
   const MAX_PER_MARKET = 4;
 
+  // Build a ranked list of every available market for one game, from its individual
+  // analysis fields, sorted by confidence descending. Used so Top Picks has more than
+  // just best_method/alternative_method to fall back on when a market is saturated.
+  const buildAllMarketsForEntry = (entry) => {
+    const a = entry.analysis;
+    const { home, away } = entry;
+    const candidates = [];
+
+    if (a.first_inning?.confidence_pct != null) {
+      candidates.push({
+        market: "SI_NO", confidence: a.first_inning.confidence_pct,
+        pickSummary: `${a.first_inning.scores === "SI" ? "Anotan" : "NO anotan"} en el 1er inning`,
+      });
+    }
+    if (a.total_runs?.confidence_pct != null) {
+      candidates.push({
+        market: "Linea", confidence: a.total_runs.confidence_pct,
+        pickSummary: `${a.total_runs.pick} ${a.total_runs.line} carreras totales`,
+      });
+    }
+    if (a.home_team_runs?.confidence_pct != null) {
+      candidates.push({
+        market: "Solo", confidence: a.home_team_runs.confidence_pct,
+        pickSummary: `${home}: ${a.home_team_runs.pick} ${a.home_team_runs.line} carreras`,
+      });
+    }
+    if (a.away_team_runs?.confidence_pct != null) {
+      candidates.push({
+        market: "Solo", confidence: a.away_team_runs.confidence_pct,
+        pickSummary: `${away}: ${a.away_team_runs.pick} ${a.away_team_runs.line} carreras`,
+      });
+    }
+    if (a.first_five_innings?.confidence_pct != null) {
+      const winnerName = a.first_five_innings.winner === "home" ? home : away;
+      candidates.push({
+        market: "H", confidence: a.first_five_innings.confidence_pct,
+        pickSummary: `${winnerName} gana first 5 innings`,
+      });
+    }
+    if (a.strikeouts_home?.confidence_pct != null && a.strikeouts_home?.line != null) {
+      candidates.push({
+        market: "K", confidence: a.strikeouts_home.confidence_pct,
+        pickSummary: `${home} abridor: ${a.strikeouts_home.pick} ${a.strikeouts_home.line} ponches`,
+      });
+    }
+    if (a.strikeouts_away?.confidence_pct != null && a.strikeouts_away?.line != null) {
+      candidates.push({
+        market: "K", confidence: a.strikeouts_away.confidence_pct,
+        pickSummary: `${away} abridor: ${a.strikeouts_away.pick} ${a.strikeouts_away.line} ponches`,
+      });
+    }
+    if (a.hce_total?.confidence_pct != null) {
+      candidates.push({
+        market: "HCE", confidence: a.hce_total.confidence_pct,
+        pickSummary: `${a.hce_total.pick} ${a.hce_total.line} carreras+hits+errores`,
+      });
+    }
+    if (a.run_line?.confidence_pct != null) {
+      const favoredName = a.run_line.favored_team === "home" ? home : away;
+      candidates.push({
+        market: "RL", confidence: a.run_line.confidence_pct,
+        pickSummary: `${favoredName} ${a.run_line.covers === "SI" ? "cubre" : "no cubre"} ${a.run_line.spread}`,
+      });
+    }
+
+    candidates.sort((x, y) => y.confidence - x.confidence);
+    return candidates;
+  };
+
   const buildTopPicks = (count) => {
     const eligible = todayAnalyzed.filter(entry => entry.analysis?.best_method);
 
@@ -708,45 +777,39 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
 
     const marketCounts = {};
     const picks = [];
-    const skippedForLater = []; // entries whose best_method was saturated and had no usable alternative
+    const skippedForLater = []; // entries where every ranked market option was saturated
 
     for (const entry of shuffled) {
       if (picks.length >= count) break;
 
-      const bm = entry.analysis.best_method;
-      const alt = entry.analysis.alternative_method;
-      const bmMarket = bm?.market;
-      const bmCount = marketCounts[bmMarket] || 0;
+      const allMarkets = buildAllMarketsForEntry(entry);
+      // Walk down this game's full ranked list (not just best/alternative) until
+      // we find a market that still has room under the cap.
+      const usable = allMarkets.find(m => (marketCounts[m.market] || 0) < MAX_PER_MARKET);
 
-      if (bmMarket && bmCount < MAX_PER_MARKET) {
-        // Best method still has room under the cap — use it
-        marketCounts[bmMarket] = bmCount + 1;
+      if (usable) {
+        marketCounts[usable.market] = (marketCounts[usable.market] || 0) + 1;
+        const isBest = allMarkets[0] === usable;
         picks.push({
-          entry, market: bmMarket, marketLabel: METHOD_LABELS[bmMarket] || bmMarket,
-          pickSummary: bm.pick_summary, confidence: bm.confidence_pct, usedAlternative: false,
-        });
-      } else if (alt?.market && (marketCounts[alt.market] || 0) < MAX_PER_MARKET) {
-        // Best method saturated — fall back to this game's alternative market
-        marketCounts[alt.market] = (marketCounts[alt.market] || 0) + 1;
-        picks.push({
-          entry, market: alt.market, marketLabel: METHOD_LABELS[alt.market] || alt.market,
-          pickSummary: alt.pick_summary, confidence: alt.confidence_pct, usedAlternative: true,
+          entry, market: usable.market, marketLabel: METHOD_LABELS[usable.market] || usable.market,
+          pickSummary: usable.pickSummary, confidence: usable.confidence, usedAlternative: !isBest,
         });
       } else {
-        // Both options saturated for this game — try again after a full pass in case room opens up
         skippedForLater.push(entry);
       }
     }
 
-    // Second pass: if we still need more picks and some were skipped, allow best_method
-    // through even over the cap rather than showing fewer picks than requested.
+    // Second pass: if we still need more picks and some were skipped, allow the
+    // top-ranked market through even over the cap rather than showing fewer picks than requested.
     if (picks.length < count && skippedForLater.length > 0) {
       for (const entry of skippedForLater) {
         if (picks.length >= count) break;
-        const bm = entry.analysis.best_method;
+        const allMarkets = buildAllMarketsForEntry(entry);
+        const top = allMarkets[0];
+        if (!top) continue;
         picks.push({
-          entry, market: bm.market, marketLabel: METHOD_LABELS[bm.market] || bm.market,
-          pickSummary: bm.pick_summary, confidence: bm.confidence_pct, usedAlternative: false, overCap: true,
+          entry, market: top.market, marketLabel: METHOD_LABELS[top.market] || top.market,
+          pickSummary: top.pickSummary, confidence: top.confidence, usedAlternative: false, overCap: true,
         });
       }
     }
