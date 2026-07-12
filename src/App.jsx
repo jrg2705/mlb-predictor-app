@@ -296,10 +296,14 @@ export default function MLBPredictor() {
   const [away, setAway] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
+  const [isFreshAnalysis, setIsFreshAnalysis] = useState(false);
   const [realStats, setRealStats] = useState(null);
   const [gameContext, setGameContext] = useState(null);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [searchingNews, setSearchingNews] = useState(false);
+  const [newsResult, setNewsResult] = useState(null); // { newsFound, newsUsed, message } from last search
+  const [newsError, setNewsError] = useState("");
   const [showStats, setShowStats] = useState(false);
 
   const [todayGames, setTodayGames] = useState([]);
@@ -403,6 +407,8 @@ export default function MLBPredictor() {
     setRealStats(null);
     setGameContext(null);
     setShowStats(false);
+    setNewsResult(null);
+    setNewsError("");
     setLoading(true);
     setTab("predictor");
     setHome(homeTeam);
@@ -419,6 +425,7 @@ export default function MLBPredictor() {
       setResult(data.analysis);
       setRealStats(data.realStats);
       setGameContext(data.gameContext || null);
+      setIsFreshAnalysis(true);
 
       const entry = {
         id: Date.now(),
@@ -502,6 +509,41 @@ export default function MLBPredictor() {
     }
   };
 
+  const handleSearchNews = async () => {
+    if (!result) return;
+    setSearchingNews(true);
+    setNewsError("");
+    setNewsResult(null);
+
+    try {
+      const res = await fetch("/api/news-context", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ home, away, previousAnalysis: result }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error al buscar noticias");
+
+      setNewsResult({ newsFound: data.newsFound, newsUsed: data.newsUsed || [], message: data.message });
+      setResult(data.analysis); // updated analysis (or unchanged, if no relevant news)
+
+      // Keep history entry in sync with the potentially updated analysis
+      setHistory(prevHistory => {
+        const updated = prevHistory.map(e =>
+          e.home === home && e.away === away && new Date(e.date).toDateString() === new Date().toDateString()
+            ? { ...e, analysis: data.analysis }
+            : e
+        );
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+        return updated;
+      });
+    } catch (e) {
+      setNewsError(`Error: ${e.message}`);
+    } finally {
+      setSearchingNews(false);
+    }
+  };
+
   const handleCopy = () => {
     if (!result) return;
     const text = `=== MLB PREDICTOR — ANÁLISIS CON DATOS REALES ===
@@ -569,6 +611,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
     setResult(entry.analysis);
     setRealStats(null);
     setGameContext(entry.gameContext || null);
+    setIsFreshAnalysis(false);
     setTab("predictor");
   };
 
@@ -946,8 +989,53 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                   }}>
                     {copied ? "✅ Copiado" : "📋 Copiar"}
                   </button>
+                  {isFreshAnalysis && (
+                    <button onClick={handleSearchNews} disabled={searchingNews} style={{
+                      background: "#142235", border: "1px solid #F4A261", color: "#F4A261",
+                      borderRadius: "6px", padding: "8px 14px", fontSize: "12px",
+                      fontWeight: 600, cursor: searchingNews ? "not-allowed" : "pointer",
+                    }}>
+                      {searchingNews ? "🔄 Buscando…" : "🔍 Buscar Noticias"}
+                    </button>
+                  )}
                 </div>
               </div>
+
+              {newsError && (
+                <p style={{ color: "#e74c3c", fontSize: "12px", textAlign: "center", marginBottom: "14px" }}>{newsError}</p>
+              )}
+
+              {newsResult && (
+                <div style={{
+                  background: newsResult.newsFound ? "linear-gradient(135deg, #142235, #2d1e0f)" : "#142235",
+                  border: `1px solid ${newsResult.newsFound ? "#F4A261" : "#1e3a52"}`,
+                  borderRadius: "12px", padding: "16px", marginBottom: "14px", animation: "fadeIn .4s ease",
+                }}>
+                  {newsResult.newsFound ? (
+                    <>
+                      <div style={{ fontSize: "11px", color: "#F4A261", letterSpacing: "0.1em", marginBottom: "10px" }}>
+                        📰 NOTICIAS ENCONTRADAS
+                      </div>
+                      {result.news_impact && (
+                        <p style={{ fontSize: "13px", color: "#F0F4F8", marginBottom: "10px", fontWeight: 600 }}>
+                          {result.news_impact}
+                        </p>
+                      )}
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                        {newsResult.newsUsed.map((n, i) => (
+                          <div key={i} style={{ fontSize: "11px", color: "#7a9ab8", borderTop: i > 0 ? "1px solid #1e3a52" : "none", paddingTop: i > 0 ? "8px" : "0" }}>
+                            <span style={{ color: "#4A90D9" }}>[{n.source}]</span> {n.title}
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <p style={{ fontSize: "12px", color: "#7a9ab8", margin: 0, textAlign: "center" }}>
+                      {newsResult.message}
+                    </p>
+                  )}
+                </div>
+              )}
 
               {showStats && realStats && (
                 <div style={{
