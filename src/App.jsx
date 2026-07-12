@@ -692,8 +692,8 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
   };
 
   // Max picks allowed from the same market in a single Top Picks generation —
-  // mirrors typical sportsbook combined-parlay restrictions (4-5 per market).
-  const MAX_PER_MARKET = 5;
+  // mirrors typical sportsbook combined-parlay restrictions.
+  const MAX_PER_MARKET = 4;
 
   const buildTopPicks = (count) => {
     const eligible = todayAnalyzed.filter(entry => entry.analysis?.best_method);
