@@ -248,6 +248,132 @@ async function callGroqWithFailover(payload) {
   return { ...first, usedFailover: false };
 }
 
+// Server-side safety net: independently determine the objectively highest-confidence
+// market from the 8 individual fields, and correct best_method/alternative_method if
+// the model's picks don't actually match the highest real numbers (guards against
+// inconsistency between the AI's stated "best" choice and its own generated data).
+function enforceObjectiveBestMethod(analysis, home, away) {
+  const candidates = [];
+
+  if (analysis.first_inning?.confidence_pct != null) {
+    candidates.push({
+      market: "SI_NO", side: "combined", line: null,
+      pick: analysis.first_inning.scores, spread: null,
+      confidence_pct: analysis.first_inning.confidence_pct,
+      pick_summary: `${analysis.first_inning.scores === "SI" ? "Anotan" : "NO anotan"} en el 1er inning`,
+      reasoning: analysis.first_inning.reasoning,
+      team_or_side: "Ambos equipos",
+    });
+  }
+  if (analysis.total_runs?.confidence_pct != null) {
+    candidates.push({
+      market: "Linea", side: "combined", line: analysis.total_runs.line,
+      pick: analysis.total_runs.pick, spread: null,
+      confidence_pct: analysis.total_runs.confidence_pct,
+      pick_summary: `${analysis.total_runs.pick} ${analysis.total_runs.line} carreras totales`,
+      reasoning: analysis.total_runs.reasoning,
+      team_or_side: "Ambos equipos",
+    });
+  }
+  if (analysis.home_team_runs?.confidence_pct != null) {
+    candidates.push({
+      market: "Solo", side: "home", line: analysis.home_team_runs.line,
+      pick: analysis.home_team_runs.pick, spread: null,
+      confidence_pct: analysis.home_team_runs.confidence_pct,
+      pick_summary: `${home}: ${analysis.home_team_runs.pick} ${analysis.home_team_runs.line} carreras`,
+      reasoning: analysis.home_team_runs.reasoning,
+      team_or_side: home,
+    });
+  }
+  if (analysis.away_team_runs?.confidence_pct != null) {
+    candidates.push({
+      market: "Solo", side: "away", line: analysis.away_team_runs.line,
+      pick: analysis.away_team_runs.pick, spread: null,
+      confidence_pct: analysis.away_team_runs.confidence_pct,
+      pick_summary: `${away}: ${analysis.away_team_runs.pick} ${analysis.away_team_runs.line} carreras`,
+      reasoning: analysis.away_team_runs.reasoning,
+      team_or_side: away,
+    });
+  }
+  if (analysis.first_five_innings?.confidence_pct != null) {
+    const winnerName = analysis.first_five_innings.winner === "home" ? home : away;
+    candidates.push({
+      market: "H", side: analysis.first_five_innings.winner, line: null,
+      pick: null, spread: null,
+      confidence_pct: analysis.first_five_innings.confidence_pct,
+      pick_summary: `${winnerName} gana first 5 innings`,
+      reasoning: analysis.first_five_innings.reasoning,
+      team_or_side: winnerName,
+    });
+  }
+  if (analysis.strikeouts_home?.confidence_pct != null && analysis.strikeouts_home?.line != null) {
+    candidates.push({
+      market: "K", side: "home", line: analysis.strikeouts_home.line,
+      pick: analysis.strikeouts_home.pick, spread: null,
+      confidence_pct: analysis.strikeouts_home.confidence_pct,
+      pick_summary: `${home} abridor: ${analysis.strikeouts_home.pick} ${analysis.strikeouts_home.line} ponches`,
+      reasoning: analysis.strikeouts_home.reasoning,
+      team_or_side: home,
+    });
+  }
+  if (analysis.strikeouts_away?.confidence_pct != null && analysis.strikeouts_away?.line != null) {
+    candidates.push({
+      market: "K", side: "away", line: analysis.strikeouts_away.line,
+      pick: analysis.strikeouts_away.pick, spread: null,
+      confidence_pct: analysis.strikeouts_away.confidence_pct,
+      pick_summary: `${away} abridor: ${analysis.strikeouts_away.pick} ${analysis.strikeouts_away.line} ponches`,
+      reasoning: analysis.strikeouts_away.reasoning,
+      team_or_side: away,
+    });
+  }
+  if (analysis.hce_total?.confidence_pct != null) {
+    candidates.push({
+      market: "HCE", side: "combined", line: analysis.hce_total.line,
+      pick: analysis.hce_total.pick, spread: null,
+      confidence_pct: analysis.hce_total.confidence_pct,
+      pick_summary: `${analysis.hce_total.pick} ${analysis.hce_total.line} carreras+hits+errores`,
+      reasoning: analysis.hce_total.reasoning,
+      team_or_side: "Ambos equipos",
+    });
+  }
+  if (analysis.run_line?.confidence_pct != null) {
+    const favoredName = analysis.run_line.favored_team === "home" ? home : away;
+    candidates.push({
+      market: "RL", side: analysis.run_line.favored_team, line: null,
+      pick: analysis.run_line.covers, spread: analysis.run_line.spread,
+      confidence_pct: analysis.run_line.confidence_pct,
+      pick_summary: `${favoredName} ${analysis.run_line.covers === "SI" ? "cubre" : "no cubre"} ${analysis.run_line.spread}`,
+      reasoning: analysis.run_line.reasoning,
+      team_or_side: favoredName,
+    });
+  }
+
+  if (candidates.length === 0) return analysis; // nothing to compare, leave as-is
+
+  // Sort descending by confidence — highest genuinely wins
+  candidates.sort((a, b) => b.confidence_pct - a.confidence_pct);
+
+  const [top, second] = candidates;
+
+  analysis.best_method = {
+    market: top.market, side: top.side, team_or_side: top.team_or_side,
+    line: top.line, pick: top.pick, spread: top.spread,
+    pick_summary: top.pick_summary, confidence_pct: top.confidence_pct,
+    reasoning: top.reasoning,
+  };
+
+  if (second) {
+    analysis.alternative_method = {
+      market: second.market, side: second.side, team_or_side: second.team_or_side,
+      line: second.line, pick: second.pick, spread: second.spread,
+      pick_summary: second.pick_summary, confidence_pct: second.confidence_pct,
+      reasoning: second.reasoning,
+    };
+  }
+
+  return analysis;
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -428,7 +554,8 @@ Responde SOLO con JSON sin markdown, estructura exacta:
 REGLAS IMPORTANTES:
 - home_win_pct + away_win_pct = 100 exactamente.
 - "best_method" es el campo MÁS IMPORTANTE para el sistema de picks: evalúa los 8 métodos disponibles (JC=juego completo/moneyline, H=first 5 innings, K=ponches del ABRIDOR probable de un equipo, Solo=carreras de un equipo específico, SI_NO=anotación combinada en el 1er inning, HCE=total carreras+hits+errores combinado, Linea=total carreras combinado, RL=run line con spread).
-- CÓMO ELEGIR "best_method" (regla objetiva, sin sesgo hacia ningún mercado en particular): primero asigna internamente un confidence_pct realista a cada uno de los 8 mercados para este partido específico, basado en los datos reales proporcionados (abridores, alineación, bullpen, tendencias). Luego, "best_method" debe ser SIEMPRE el mercado con el confidence_pct numéricamente más alto de los 8 — sin excepción, sin preferencia por JC ni por ningún otro mercado en particular. Si tras esa evaluación JC resulta ser el más alto en varios partidos seguidos, está perfectamente bien reflejarlo así; si otro mercado (K, First 5, HCE, etc.) es genuinamente más alto en otros partidos, ese debe ganar. No apliques ninguna regla de "prioridad" o "variedad" que altere este orden objetivo — la única guía es el número de confianza real que tú mismo asignes a cada mercado según los datos.
+- CÓMO ELEGIR "best_method" (regla objetiva y verificable, sin sesgo hacia ningún mercado en particular): genera PRIMERO los 8 campos individuales de mercado (first_inning, total_runs, home_team_runs, away_team_runs, first_five_innings, strikeouts_home, strikeouts_away, hce_total, run_line) con sus respectivos confidence_pct realistas y diferenciados. SOLO DESPUÉS de tener esos 8 números generados, compara los 8 confidence_pct entre sí y elige "best_method" = el mercado con el número más alto. El confidence_pct que reportes dentro de "best_method" DEBE ser EXACTAMENTE IGUAL (el mismo número, sin redondear ni ajustar) al confidence_pct que ya escribiste en el campo individual correspondiente a ese mercado — nunca inventes un número nuevo para "best_method" que no coincida con su campo fuente. Por ejemplo, si eliges "SI_NO" como best_method porque first_inning.confidence_pct fue 60, entonces best_method.confidence_pct también debe ser 60, no un valor distinto. Esta consistencia es OBLIGATORIA y se verifica automáticamente.
+- "alternative_method" sigue la misma regla: su confidence_pct debe coincidir exactamente con el campo individual del segundo mercado más alto, generado con el mismo criterio.
 - Sé exigente y realista al asignar cada confidence_pct: no repitas el mismo valor de forma mecánica entre partidos ni entre mercados dentro del mismo partido. Diferencia genuinamente la confianza según la fuerza real de los datos disponibles (por ejemplo, un abridor con K/9 muy alto frente a un lineup con muchos ponches debería tener un confidence_pct notablemente más alto en el mercado K que uno con datos mediocres).
 - IMPORTANTE: si eliges "K" como "best_method" o "alternative_method", el campo "line", "pick" y "confidence_pct" DEBEN coincidir exactamente con los del campo strikeouts_home/strikeouts_away correspondiente (que ya representan al abridor probable específico). Esto es un requisito de las casas de apuestas que solo aceptan picks de ponches por abridor individual. Si no hay abridor confirmado para ese equipo (line es null), no elijas "K" como mercado.
 - "alternative_method" DEBE ser un mercado distinto al de "best_method" (nunca repitas el mismo "market" en ambos campos), y debe ser el mercado con el SEGUNDO confidence_pct más alto de los 8, siguiendo el mismo criterio objetivo.
@@ -477,6 +604,10 @@ REGLAS IMPORTANTES:
         details: parseErr.message,
       });
     }
+
+    // Enforce objective best_method/alternative_method selection server-side,
+    // independent of whatever the AI reported, to guarantee genuine numeric comparison.
+    analysis = enforceObjectiveBestMethod(analysis, home, away);
 
     // 5. Return combined data
     return res.status(200).json({
