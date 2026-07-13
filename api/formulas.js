@@ -191,6 +191,59 @@ function calculateHCE({ totalProjectedRuns, homeAvg, awayAvg, homeGamesPlayed, a
   };
 }
 
+// ---------- SI/NO Primer Inning (NRFI/YRFI) ----------
+// Industry-standard NRFI/YRFI models (documented across betting-analytics sites)
+// start from a historical MLB base rate of ~55-60% NRFI (no run in the 1st),
+// then adjust using: (1) the starting pitcher's WHIP/ERA — a stronger start
+// gives more NRFI weight — and (2) the top-of-order OBP of the OPPOSING lineup,
+// since the top 3 hitters bat in the 1st inning most often. We blend both
+// starters' quality (each facing the other lineup's leadoff hitters).
+const NRFI_BASE_RATE = 0.57; // historical MLB-wide NRFI rate, mid-point of documented 55-60% range
+
+function calculateFirstInningNRFI({ homeStarterWhip, awayStarterWhip, homeStarterEra, awayStarterEra, homeObp, awayObp, leagueAvgWhip = 1.30, leagueAvgEra = 4.30, leagueAvgObp = 0.320 }) {
+  // If no confirmed starter for either team, fall back to the pure historical base rate.
+  const hasHomeStarter = homeStarterWhip != null && homeStarterEra != null;
+  const hasAwayStarter = awayStarterWhip != null && awayStarterEra != null;
+
+  if (!hasHomeStarter && !hasAwayStarter) {
+    return {
+      nrfi_probability_pct: Math.round(NRFI_BASE_RATE * 100),
+      method: "Historical MLB base rate only (no confirmed starters yet)",
+    };
+  }
+
+  // Each starter's "quality factor": below-average WHIP/ERA (better pitcher) pushes
+  // toward NRFI; above-average pushes toward YRFI. Normalized around league averages.
+  const starterQuality = (whip, era) => {
+    if (whip == null || era == null) return 0; // neutral if unknown
+    const whipFactor = (leagueAvgWhip - whip) / leagueAvgWhip; // positive = better than average
+    const eraFactor = (leagueAvgEra - era) / leagueAvgEra;
+    return (whipFactor + eraFactor) / 2;
+  };
+
+  // Opposing lineup's top-of-order threat: higher OBP than league average pushes toward YRFI.
+  const lineupThreat = (obp) => {
+    if (obp == null) return 0;
+    return (obp - leagueAvgObp) / leagueAvgObp;
+  };
+
+  const homeStarterEffect = starterQuality(homeStarterWhip, homeStarterEra); // helps NRFI when home pitches well
+  const awayStarterEffect = starterQuality(awayStarterWhip, awayStarterEra); // helps NRFI when away pitches well
+  const awayLineupThreatVsHome = lineupThreat(awayObp); // away batters face home's 1st inning pitching
+  const homeLineupThreatVsAway = lineupThreat(homeObp); // home batters face away's 1st inning pitching
+
+  // Combine: both starters pitching well raises NRFI probability; both lineups
+  // being dangerous lowers it. Weight starters slightly more (they control the frame).
+  const adjustment = (homeStarterEffect + awayStarterEffect) * 0.12 - (awayLineupThreatVsHome + homeLineupThreatVsAway) * 0.10;
+
+  const nrfiProb = Math.min(0.80, Math.max(0.30, NRFI_BASE_RATE + adjustment));
+
+  return {
+    nrfi_probability_pct: Math.round(nrfiProb * 100),
+    method: "Historical NRFI base rate (57%) adjusted by both starters' WHIP/ERA vs league average and opposing lineups' OBP",
+  };
+}
+
 export {
   log5,
   pythagoreanWinPct,
@@ -200,4 +253,5 @@ export {
   calculateIndividualRuns,
   calculateFirstFiveInnings,
   calculateHCE,
+  calculateFirstInningNRFI,
 };

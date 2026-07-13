@@ -1,7 +1,7 @@
 // api/analyze.js — Vercel Serverless Function
 // Fetches real MLB stats (team + probable pitchers + lineup if available) + calls Groq AI
 
-import { calculateMoneyline, calculateTotalRuns, calculateRunLine, calculateIndividualRuns, calculateFirstFiveInnings, calculateHCE } from "./formulas.js";
+import { calculateMoneyline, calculateTotalRuns, calculateRunLine, calculateIndividualRuns, calculateFirstFiveInnings, calculateHCE, calculateFirstInningNRFI } from "./formulas.js";
 
 const MLB_BASE = "https://statsapi.mlb.com/api/v1";
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
@@ -578,6 +578,23 @@ export default async function handler(req, res) {
       weather = wx;
     }
 
+    // Calculate NRFI/YRFI formula now that pitcher data is resolved.
+    // parseFloat safely returns NaN for "N/A" strings, which we convert to null
+    // so the formula correctly falls back to the historical base rate.
+    const parseStatOrNull = (val) => {
+      const parsed = parseFloat(val);
+      return isNaN(parsed) ? null : parsed;
+    };
+
+    const formulaNRFI = calculateFirstInningNRFI({
+      homeStarterWhip: parseStatOrNull(homePitcher?.whip),
+      homeStarterEra: parseStatOrNull(homePitcher?.era),
+      awayStarterWhip: parseStatOrNull(awayPitcher?.whip),
+      awayStarterEra: parseStatOrNull(awayPitcher?.era),
+      homeObp: parseStatOrNull(homeStats.obp),
+      awayObp: parseStatOrNull(awayStats.obp),
+    });
+
     // 3. Build prompt — prioritize starting pitcher data when available
     const pitcherBlock = (homePitcher || awayPitcher) ? `
 ABRIDORES PROBABLES CONFIRMADOS (dato más importante para el análisis):
@@ -645,6 +662,7 @@ CÁLCULO ESTADÍSTICO BASE (fórmulas sabermétricas validadas — Log5 + Pythag
 - Carreras individuales base: ${home} línea ${formulaHomeIndividualRuns.line} | ${away} línea ${formulaAwayIndividualRuns.line}
 - First 5 Innings base: ${home} ${formulaFirstFive.home_f5_win_pct}% — ${away} ${formulaFirstFive.away_f5_win_pct}% (proyección: ${formulaFirstFive.projected_home_f5_runs} vs ${formulaFirstFive.projected_away_f5_runs} carreras en 5 innings)
 - HCE base (Carreras+Hits+Errores combinado): línea ${formulaHCE.line} (proyección: ${formulaHCE.projected_hits} hits + ${formulaHCE.projected_errors} errores + ${formulaTotalRuns.line} carreras)
+- NRFI/YRFI base (SI/NO 1er inning): probabilidad de NO anotar (NRFI) ${formulaNRFI.nrfi_probability_pct}% — calculado desde tasa histórica MLB (57%) ajustada por WHIP/ERA de ambos abridores probables y OBP de ambos lineups (${formulaNRFI.method})
 ${pitcherBlock}${lineupBlock}${weatherBlock}${fatigueBlock}${injuryBlock}
 
 Responde SOLO con JSON sin markdown, estructura exacta:
@@ -654,9 +672,9 @@ Responde SOLO con JSON sin markdown, estructura exacta:
   "away_win_pct": <entero 0-100, debe sumar 100 con home_win_pct>,
 
   "first_inning": {
-    "scores": "<SI|NO>",
-    "confidence_pct": <entero 0-100>,
-    "reasoning": "<SI significa que AL MENOS UN equipo anota en el 1er inning (combinado). NO significa que el 1er inning completo termina 0-0 entre ambos equipos. Justifica con abridores probables, 1 oración>"
+    "scores": "<SI|NO. SI significa que anotan (YRFI). NO significa 0-0 combinado (NRFI). Usa como referencia el 'NRFI/YRFI base' calculado arriba: si nrfi_probability_pct es mayor a 50%, el pick base sería NO; si es menor a 50%, el pick base sería SI. Ajusta según el contexto específico del día>",
+    "confidence_pct": <entero 0-100. Si tu pick final es NO, usa directamente o cerca del nrfi_probability_pct base; si es SI, usa 100 menos ese valor como referencia, ajustando con el contexto>,
+    "reasoning": "<justifica citando el cálculo NRFI/YRFI base y qué factor del día (abridores, lineup) motivó mantener o ajustar ese número, 1 oración>"
   },
 
   "total_runs": {
@@ -749,7 +767,7 @@ Responde SOLO con JSON sin markdown, estructura exacta:
 
 REGLAS IMPORTANTES:
 - home_win_pct + away_win_pct = 100 exactamente.
-- FASE 2 — RESPETO AL CÁLCULO ESTADÍSTICO BASE: los valores de "Moneyline base", "Total de carreras proyectado (base)", "Run Line base", "Carreras individuales base", "First 5 Innings base" y "HCE base" en la sección de datos son resultado de fórmulas sabermétricas validadas (Log5, Pythagorean Expectation, proyecciones ajustadas por matchup), no estimaciones tuyas. DEBES usarlos como punto de partida real para home_win_pct, total_runs.line, run_line.spread/cover, home_team_runs.line, away_team_runs.line, first_five_innings.winner, y hce_total.line — no los ignores ni generes números completamente distintos sin razón. SÍ puedes y DEBES ajustarlos con el contexto específico del día (abridor confirmado fuerte/débil, clima favorable/desfavorable a carreras, bullpen fatigado, lesiones de jugadores clave) — ese es precisamente tu valor agregado sobre el cálculo puramente estadístico. Un ajuste de más de 10 puntos porcentuales (o más de 1.5 en líneas de carreras) respecto al base debe estar claramente justificado en el "reasoning" correspondiente citando el factor específico que lo motiva.
+- FASE 2 — RESPETO AL CÁLCULO ESTADÍSTICO BASE: los valores de "Moneyline base", "Total de carreras proyectado (base)", "Run Line base", "Carreras individuales base", "First 5 Innings base", "HCE base" y "NRFI/YRFI base" en la sección de datos son resultado de fórmulas sabermétricas validadas (Log5, Pythagorean Expectation, proyecciones ajustadas por matchup, modelo NRFI estándar de la industria), no estimaciones tuyas. DEBES usarlos como punto de partida real para home_win_pct, total_runs.line, run_line.spread/cover, home_team_runs.line, away_team_runs.line, first_five_innings.winner, hce_total.line, y first_inning.scores/confidence_pct — no los ignores ni generes números completamente distintos sin razón. SÍ puedes y DEBES ajustarlos con el contexto específico del día (abridor confirmado fuerte/débil, clima favorable/desfavorable a carreras, bullpen fatigado, lesiones de jugadores clave) — ese es precisamente tu valor agregado sobre el cálculo puramente estadístico. Un ajuste de más de 10 puntos porcentuales (o más de 1.5 en líneas de carreras) respecto al base debe estar claramente justificado en el "reasoning" correspondiente citando el factor específico que lo motiva.
 - "best_method" es el campo MÁS IMPORTANTE para el sistema de picks: evalúa los 8 métodos disponibles (JC=juego completo/moneyline, H=first 5 innings, K=ponches del ABRIDOR probable de un equipo, Solo=carreras de un equipo específico, SI_NO=anotación combinada en el 1er inning, HCE=total carreras+hits+errores combinado, Linea=total carreras combinado, RL=run line con spread).
 - CÓMO ELEGIR "best_method" (regla objetiva y verificable, sin sesgo hacia ningún mercado en particular): genera PRIMERO los 8 campos individuales de mercado (first_inning, total_runs, home_team_runs, away_team_runs, first_five_innings, strikeouts_home, strikeouts_away, hce_total, run_line) con sus respectivos confidence_pct realistas y diferenciados. SOLO DESPUÉS de tener esos 8 números generados, compara los 8 confidence_pct entre sí y elige "best_method" = el mercado con el número más alto. El confidence_pct que reportes dentro de "best_method" DEBE ser EXACTAMENTE IGUAL (el mismo número, sin redondear ni ajustar) al confidence_pct que ya escribiste en el campo individual correspondiente a ese mercado — nunca inventes un número nuevo para "best_method" que no coincida con su campo fuente. Por ejemplo, si eliges "SI_NO" como best_method porque first_inning.confidence_pct fue 60, entonces best_method.confidence_pct también debe ser 60, no un valor distinto. Esta consistencia es OBLIGATORIA y se verifica automáticamente.
 - "alternative_method" sigue la misma regla: su confidence_pct debe coincidir exactamente con el campo individual del segundo mercado más alto, generado con el mismo criterio.
@@ -832,6 +850,7 @@ REGLAS IMPORTANTES:
         awayIndividualRuns: formulaAwayIndividualRuns,
         firstFive: formulaFirstFive,
         hce: formulaHCE,
+        nrfi: formulaNRFI,
       },
     });
   } catch (err) {
