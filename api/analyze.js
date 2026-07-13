@@ -1,6 +1,8 @@
 // api/analyze.js — Vercel Serverless Function
 // Fetches real MLB stats (team + probable pitchers + lineup if available) + calls Groq AI
 
+import { calculateMoneyline, calculateTotalRuns, calculateRunLine } from "./formulas.js";
+
 const MLB_BASE = "https://statsapi.mlb.com/api/v1";
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
 
@@ -53,6 +55,9 @@ async function fetchMLBStats(teamId) {
   const hStats = hitting?.stats?.[0]?.splits?.[0]?.stat || {};
   const pStats = pitching?.stats?.[0]?.splits?.[0]?.stat || {};
 
+  const runsScored = hStats.runs ?? 0;
+  const runsAllowed = pStats.runs ?? 0; // runs allowed = runs given up by this team's pitching
+
   return {
     avg: hStats.avg || "N/A",
     ops: hStats.ops || "N/A",
@@ -69,7 +74,28 @@ async function fetchMLBStats(teamId) {
     saves: pStats.saves || "N/A",
     blownSaves: pStats.blownSaves || "N/A",
     rosterSize: roster?.roster?.length || "N/A",
+    // Fields needed for the statistical formulas (Moneyline, Total Runs, Run Line).
+    // wins/losses/gamesPlayed are filled in separately via fetchTeamRecord (standings endpoint).
+    runsScored,
+    runsAllowed,
   };
+}
+
+// Fetches a team's real win-loss record from the standings endpoint — the
+// documented, reliable source for wins/losses (unlike ad-hoc team hydrations).
+async function fetchTeamRecord(teamId) {
+  try {
+    const season = new Date().getFullYear();
+    const res = await fetch(`${MLB_BASE}/standings?leagueId=103,104&season=${season}&standingsTypes=regularSeason`);
+    const data = await res.json();
+    const allTeams = (data?.records || []).flatMap(r => r.teamRecords || []);
+    const teamRecord = allTeams.find(tr => tr.team?.id === teamId);
+    const wins = teamRecord?.wins ?? 0;
+    const losses = teamRecord?.losses ?? 0;
+    return { wins, losses, gamesPlayed: wins + losses };
+  } catch {
+    return { wins: 0, losses: 0, gamesPlayed: 0 };
+  }
 }
 
 async function fetchHeadToHead(homeId, awayId) {
@@ -486,13 +512,35 @@ export default async function handler(req, res) {
   if (!homeId || !awayId) return res.status(400).json({ error: "Invalid team name" });
 
   try {
-    // 1. Fetch team-level stats + H2H + upcoming game info in parallel
-    const [homeStats, awayStats, h2h, gameInfo] = await Promise.all([
+    // 1. Fetch team-level stats + H2H + upcoming game info + win-loss records in parallel
+    const [homeStats, awayStats, h2h, gameInfo, homeRecord, awayRecord] = await Promise.all([
       fetchMLBStats(homeId),
       fetchMLBStats(awayId),
       fetchHeadToHead(homeId, awayId),
       fetchUpcomingGameInfo(homeId, awayId, requestedGamePk),
+      fetchTeamRecord(homeId),
+      fetchTeamRecord(awayId),
     ]);
+
+    // Calculate statistical formulas (Fase 2) — these become ground truth for the
+    // AI to adjust using same-day context (pitchers, weather, fatigue, injuries),
+    // rather than the AI estimating these numbers from scratch.
+    const formulaMoneyline = calculateMoneyline({
+      homeWins: homeRecord.wins, homeLosses: homeRecord.losses,
+      awayWins: awayRecord.wins, awayLosses: awayRecord.losses,
+      homeRunsScored: homeStats.runsScored, homeRunsAllowed: homeStats.runsAllowed,
+      awayRunsScored: awayStats.runsScored, awayRunsAllowed: awayStats.runsAllowed,
+    });
+
+    const formulaTotalRuns = calculateTotalRuns({
+      homeRunsScored: homeStats.runsScored, homeGamesPlayed: homeRecord.gamesPlayed, homeRunsAllowed: homeStats.runsAllowed,
+      awayRunsScored: awayStats.runsScored, awayGamesPlayed: awayRecord.gamesPlayed, awayRunsAllowed: awayStats.runsAllowed,
+    });
+
+    const formulaRunLine = calculateRunLine({
+      homeWinPct: formulaMoneyline.home_win_pct, awayWinPct: formulaMoneyline.away_win_pct,
+      projectedHomeRuns: formulaTotalRuns.projected_home_runs, projectedAwayRuns: formulaTotalRuns.projected_away_runs,
+    });
 
     // 2. Fetch probable pitcher stats (if known) + lineup (if published) + weather + bullpen fatigue + injuries
     let homePitcher = null, awayPitcher = null, lineup = null, weather = null;
@@ -572,13 +620,18 @@ EQUIPO VISITANTE — ${away}:
 - Bullpen: Salvamentos ${awayStats.saves} | Blown Saves ${awayStats.blownSaves}
 
 HEAD-TO-HEAD (temporada actual): ${home} ${h2h.homeWins}W - ${h2h.awayWins}W ${away} (${h2h.totalGames} juegos)
+
+CÁLCULO ESTADÍSTICO BASE (fórmulas sabermétricas validadas — Log5 + Pythagorean Expectation, NO generadas por IA):
+- Moneyline base: ${home} ${formulaMoneyline.home_win_pct}% — ${away} ${formulaMoneyline.away_win_pct}% (calculado con Log5 + Pythagorean Expectation + ajuste de local)
+- Total de carreras proyectado (base): ${formulaTotalRuns.line} (${home} ${formulaTotalRuns.projected_home_runs}, ${away} ${formulaTotalRuns.projected_away_runs})
+- Run Line base: favorito ${formulaRunLine.favored_side === "home" ? home : away} ${formulaRunLine.spread}, probabilidad de cubrir ${formulaRunLine.cover_probability_pct}%
 ${pitcherBlock}${lineupBlock}${weatherBlock}${fatigueBlock}${injuryBlock}
 
 Responde SOLO con JSON sin markdown, estructura exacta:
 
 {
-  "home_win_pct": <entero 0-100>,
-  "away_win_pct": <entero 0-100>,
+  "home_win_pct": <entero 0-100. PARTE del cálculo estadístico base (Moneyline) de arriba y AJÚSTALO usando el contexto específico de HOY (abridores confirmados, clima, fatiga de bullpen, lesiones, alineación). Un ajuste típico razonable es de ±3 a ±8 puntos porcentuales según qué tan fuerte sea el contexto del día; no ignores el número base ni lo cambies drásticamente sin justificación clara en tu razonamiento>,
+  "away_win_pct": <entero 0-100, debe sumar 100 con home_win_pct>,
 
   "first_inning": {
     "scores": "<SI|NO>",
@@ -587,10 +640,10 @@ Responde SOLO con JSON sin markdown, estructura exacta:
   },
 
   "total_runs": {
-    "line": <decimal ej 8.5>,
-    "pick": "<OVER|UNDER>",
+    "line": <decimal ej 8.5. Usa como referencia inicial la línea calculada en "Total de carreras proyectado (base)" de arriba, y ajústala si el contexto del día (clima, abridores, fatiga) lo justifica>,
+    "pick": "<OVER|UNDER, tu decisión final considerando la línea base y el contexto del día>",
     "confidence_pct": <entero 0-100>,
-    "reasoning": "<total de carreras COMBINADAS de ambos equipos en el juego completo, vs línea. Justifica con ambos abridores y ofensivas, 1 oración>"
+    "reasoning": "<total de carreras COMBINADAS de ambos equipos en el juego completo, vs línea. Justifica con ambos abridores y ofensivas, mencionando si te alejaste de la línea base del cálculo estadístico y por qué, 1 oración>"
   },
 
   "home_team_runs": {
@@ -636,10 +689,10 @@ Responde SOLO con JSON sin markdown, estructura exacta:
 
   "run_line": {
     "favored_team": "<home|away, el equipo con mayor % en home_win_pct/away_win_pct>",
-    "spread": "<-1.5 o -2.5, el hándicap que se le resta al favorito>",
+    "spread": "<-1.5 o -2.5, usa como referencia el spread y probabilidad de cubrir calculados en 'Run Line base' de arriba, ajustando si el contexto del día lo justifica>",
     "covers": "<SI|NO, si el favorito gana por más carreras que el spread>",
     "confidence_pct": <entero 0-100>,
-    "reasoning": "<justifica si el margen de victoria esperado del favorito supera el spread, considerando fuerza ofensiva y bullpen rival, 1 oración>"
+    "reasoning": "<justifica si el margen de victoria esperado del favorito supera el spread, considerando fuerza ofensiva y bullpen rival, mencionando si te alejaste del cálculo base y por qué, 1 oración>"
   },
 
   "best_method": {
@@ -676,6 +729,7 @@ Responde SOLO con JSON sin markdown, estructura exacta:
 
 REGLAS IMPORTANTES:
 - home_win_pct + away_win_pct = 100 exactamente.
+- FASE 2 — RESPETO AL CÁLCULO ESTADÍSTICO BASE: los valores de "Moneyline base", "Total de carreras proyectado (base)" y "Run Line base" en la sección de datos son resultado de fórmulas sabermétricas validadas (Log5, Pythagorean Expectation), no estimaciones tuyas. DEBES usarlos como punto de partida real para home_win_pct, total_runs.line, y run_line.spread/cover — no los ignores ni generes números completamente distintos sin razón. SÍ puedes y DEBES ajustarlos con el contexto específico del día (abridor confirmado fuerte/débil, clima favorable/desfavorable a carreras, bullpen fatigado, lesiones de jugadores clave) — ese es precisamente tu valor agregado sobre el cálculo puramente estadístico. Un ajuste de más de 10 puntos porcentuales respecto al base debe estar claramente justificado en el "reasoning" correspondiente citando el factor específico que lo motiva.
 - "best_method" es el campo MÁS IMPORTANTE para el sistema de picks: evalúa los 8 métodos disponibles (JC=juego completo/moneyline, H=first 5 innings, K=ponches del ABRIDOR probable de un equipo, Solo=carreras de un equipo específico, SI_NO=anotación combinada en el 1er inning, HCE=total carreras+hits+errores combinado, Linea=total carreras combinado, RL=run line con spread).
 - CÓMO ELEGIR "best_method" (regla objetiva y verificable, sin sesgo hacia ningún mercado en particular): genera PRIMERO los 8 campos individuales de mercado (first_inning, total_runs, home_team_runs, away_team_runs, first_five_innings, strikeouts_home, strikeouts_away, hce_total, run_line) con sus respectivos confidence_pct realistas y diferenciados. SOLO DESPUÉS de tener esos 8 números generados, compara los 8 confidence_pct entre sí y elige "best_method" = el mercado con el número más alto. El confidence_pct que reportes dentro de "best_method" DEBE ser EXACTAMENTE IGUAL (el mismo número, sin redondear ni ajustar) al confidence_pct que ya escribiste en el campo individual correspondiente a ese mercado — nunca inventes un número nuevo para "best_method" que no coincida con su campo fuente. Por ejemplo, si eliges "SI_NO" como best_method porque first_inning.confidence_pct fue 60, entonces best_method.confidence_pct también debe ser 60, no un valor distinto. Esta consistencia es OBLIGATORIA y se verifica automáticamente.
 - "alternative_method" sigue la misma regla: su confidence_pct debe coincidir exactamente con el campo individual del segundo mercado más alto, generado con el mismo criterio.
@@ -749,6 +803,11 @@ REGLAS IMPORTANTES:
         injuries: { home: homeInjuries, away: awayInjuries },
         gameDate: gameInfo?.gameDate || null,
         gamePk: gameInfo?.gamePk || null,
+      },
+      formulaBaseline: {
+        moneyline: formulaMoneyline,
+        totalRuns: formulaTotalRuns,
+        runLine: formulaRunLine,
       },
     });
   } catch (err) {
