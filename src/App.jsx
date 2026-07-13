@@ -304,6 +304,7 @@ export default function MLBPredictor() {
   const [searchingNews, setSearchingNews] = useState(false);
   const [newsResult, setNewsResult] = useState(null); // { newsFound, newsUsed, message } from last search
   const [newsError, setNewsError] = useState("");
+  const [showNewsDetail, setShowNewsDetail] = useState(false);
   const [showStats, setShowStats] = useState(false);
 
   const [todayGames, setTodayGames] = useState([]);
@@ -397,6 +398,45 @@ export default function MLBPredictor() {
     setTrackRecord({ total: 0, correct: 0, byBand: {} });
   };
 
+  const handleSearchNews = async (homeTeam = home, awayTeam = away, currentAnalysis = result) => {
+    if (!currentAnalysis) return;
+    setSearchingNews(true);
+    setNewsError("");
+    setNewsResult(null);
+
+    try {
+      const res = await fetch("/api/news-context", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ home: homeTeam, away: awayTeam, previousAnalysis: currentAnalysis }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error al buscar noticias");
+
+      setNewsResult({ newsFound: data.newsFound, newsUsed: data.newsUsed || [], message: data.message });
+      setResult(data.analysis); // updated analysis (or unchanged, if no relevant news)
+
+      // Keep history entry in sync with the potentially updated analysis AND the news used,
+      // so returning from History later still shows what news influenced the pick.
+      setHistory(prevHistory => {
+        const updated = prevHistory.map(e =>
+          e.home === homeTeam && e.away === awayTeam && new Date(e.date).toDateString() === new Date().toDateString()
+            ? { ...e, analysis: data.analysis, newsUsed: data.newsUsed || [] }
+            : e
+        );
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+        return updated;
+      });
+
+      return data.analysis;
+    } catch (e) {
+      setNewsError(`Error: ${e.message}`);
+      return null;
+    } finally {
+      setSearchingNews(false);
+    }
+  };
+
   const analyze = async (homeTeam = home, awayTeam = away, specificGamePk = null) => {
     if (!homeTeam || !awayTeam || homeTeam === awayTeam) {
       setError("Selecciona dos equipos diferentes.");
@@ -409,6 +449,7 @@ export default function MLBPredictor() {
     setShowStats(false);
     setNewsResult(null);
     setNewsError("");
+    setShowNewsDetail(false);
     setLoading(true);
     setTab("predictor");
     setHome(homeTeam);
@@ -438,6 +479,12 @@ export default function MLBPredictor() {
         verified: false,
       };
       setHistory(saveToHistory(entry));
+      setLoading(false);
+
+      // Automatically search news right after the base analysis completes.
+      // Runs in the background — the base analysis is already visible to the user.
+      handleSearchNews(homeTeam, awayTeam, data.analysis);
+      return;
     } catch (e) {
       setError(`Error: ${e.message}`);
     } finally {
@@ -506,42 +553,6 @@ export default function MLBPredictor() {
           scheduleGameNotification(g);
         }
       });
-    }
-  };
-
-  const handleSearchNews = async () => {
-    if (!result) return;
-    setSearchingNews(true);
-    setNewsError("");
-    setNewsResult(null);
-
-    try {
-      const res = await fetch("/api/news-context", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ home, away, previousAnalysis: result }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Error al buscar noticias");
-
-      setNewsResult({ newsFound: data.newsFound, newsUsed: data.newsUsed || [], message: data.message });
-      setResult(data.analysis); // updated analysis (or unchanged, if no relevant news)
-
-      // Keep history entry in sync with the potentially updated analysis AND the news used,
-      // so returning from History later still shows what news influenced the pick.
-      setHistory(prevHistory => {
-        const updated = prevHistory.map(e =>
-          e.home === home && e.away === away && new Date(e.date).toDateString() === new Date().toDateString()
-            ? { ...e, analysis: data.analysis, newsUsed: data.newsUsed || [] }
-            : e
-        );
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
-        return updated;
-      });
-    } catch (e) {
-      setNewsError(`Error: ${e.message}`);
-    } finally {
-      setSearchingNews(false);
     }
   };
 
@@ -615,6 +626,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
     setIsFreshAnalysis(false);
     setNewsResult(entry.newsUsed?.length > 0 ? { newsFound: true, newsUsed: entry.newsUsed } : null);
     setNewsError("");
+    setShowNewsDetail(false);
     setTab("predictor");
   };
 
@@ -1029,15 +1041,13 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                   }}>
                     {copied ? "✅ Copiado" : "📋 Copiar"}
                   </button>
-                  {isFreshAnalysis && (
-                    <button onClick={handleSearchNews} disabled={searchingNews} style={{
-                      background: "#142235", border: "1px solid #F4A261", color: "#F4A261",
-                      borderRadius: "6px", padding: "8px 14px", fontSize: "12px",
-                      fontWeight: 600, cursor: searchingNews ? "not-allowed" : "pointer",
-                    }}>
-                      {searchingNews ? "🔄 Buscando…" : "🔍 Buscar Noticias"}
-                    </button>
-                  )}
+                  <button onClick={() => handleSearchNews()} disabled={searchingNews} style={{
+                    background: "#142235", border: "1px solid #F4A261", color: "#F4A261",
+                    borderRadius: "6px", padding: "8px 14px", fontSize: "12px",
+                    fontWeight: 600, cursor: searchingNews ? "not-allowed" : "pointer",
+                  }}>
+                    {searchingNews ? "🔄 Buscando…" : "🔍 Buscar Noticias"}
+                  </button>
                 </div>
               </div>
 
@@ -1046,33 +1056,36 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
               )}
 
               {newsResult && (
-                <div style={{
-                  background: newsResult.newsFound ? "linear-gradient(135deg, #142235, #2d1e0f)" : "#142235",
-                  border: `1px solid ${newsResult.newsFound ? "#F4A261" : "#1e3a52"}`,
-                  borderRadius: "12px", padding: "16px", marginBottom: "14px", animation: "fadeIn .4s ease",
-                }}>
-                  {newsResult.newsFound ? (
-                    <>
-                      <div style={{ fontSize: "11px", color: "#F4A261", letterSpacing: "0.1em", marginBottom: "10px" }}>
-                        📰 NOTICIAS ENCONTRADAS
-                      </div>
-                      {result.news_impact && (
-                        <p style={{ fontSize: "13px", color: "#F0F4F8", marginBottom: "10px", fontWeight: 600 }}>
+                <div style={{ marginBottom: "14px" }}>
+                  <button onClick={() => setShowNewsDetail(!showNewsDetail)} style={{
+                    background: "none", border: "none", cursor: "pointer", width: "100%",
+                    padding: 0, textAlign: "center",
+                  }}>
+                    <p style={{
+                      fontSize: "11px", margin: 0,
+                      color: newsResult.newsFound ? "#F4A261" : "#7a9ab8",
+                    }}>
+                      {newsResult.newsFound
+                        ? `📰 Noticias aplicadas — ${newsResult.newsUsed.length} fuente(s) ${showNewsDetail ? "▲" : "▼"}`
+                        : `${newsResult.message} ${showNewsDetail ? "▲" : "▼"}`}
+                    </p>
+                  </button>
+                  {showNewsDetail && (
+                    <div style={{
+                      background: "#142235", border: "1px solid #1e3a52", borderRadius: "10px",
+                      padding: "14px", marginTop: "8px", animation: "fadeIn .3s ease",
+                    }}>
+                      {result?.news_impact && (
+                        <p style={{ fontSize: "12px", color: "#F0F4F8", marginBottom: "10px", fontWeight: 600 }}>
                           {result.news_impact}
                         </p>
                       )}
-                      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                        {newsResult.newsUsed.map((n, i) => (
-                          <div key={i} style={{ fontSize: "11px", color: "#7a9ab8", borderTop: i > 0 ? "1px solid #1e3a52" : "none", paddingTop: i > 0 ? "8px" : "0" }}>
-                            <span style={{ color: "#4A90D9" }}>[{n.source}]</span> {n.title}
-                          </div>
-                        ))}
-                      </div>
-                    </>
-                  ) : (
-                    <p style={{ fontSize: "12px", color: "#7a9ab8", margin: 0, textAlign: "center" }}>
-                      {newsResult.message}
-                    </p>
+                      {newsResult.newsUsed?.map((n, i) => (
+                        <div key={i} style={{ fontSize: "11px", color: "#7a9ab8", borderTop: i > 0 ? "1px solid #1e3a52" : "none", paddingTop: i > 0 ? "8px" : "0", marginTop: i > 0 ? "8px" : "0" }}>
+                          <span style={{ color: "#4A90D9" }}>[{n.source}]</span> {n.title}
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
               )}
