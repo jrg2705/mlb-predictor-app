@@ -10,14 +10,15 @@ async function searchTeamNews(teamName) {
   const apiKey = process.env.NEWSDATA_API_KEY;
   if (!apiKey) return [];
 
-  try {
-    const query = encodeURIComponent(`"${teamName}" MLB`);
-    const url = `${NEWSDATA_API}?apikey=${apiKey}&q=${query}&language=en,es&category=sports&size=5`;
+  const fromDate = new Date();
+  fromDate.setDate(fromDate.getDate() - 3);
+  const fromDateStr = fromDate.toISOString().split("T")[0];
+
+  const runQuery = async (query) => {
+    const url = `${NEWSDATA_API}?apikey=${apiKey}&q=${encodeURIComponent(query)}&language=en,es&category=sports&size=5&from_date=${fromDateStr}`;
     const res = await fetch(url);
     const data = await res.json();
-
     if (!data.results) return [];
-
     return data.results.slice(0, 5).map(article => ({
       title: article.title,
       description: article.description || "",
@@ -25,6 +26,19 @@ async function searchTeamNews(teamName) {
       source: article.source_id,
       link: article.link,
     }));
+  };
+
+  try {
+    // More specific query targeting the kind of news that actually changes a
+    // pick: injuries, lineup changes, pitcher swaps — not generic season news.
+    const specificResults = await runQuery(
+      `"${teamName}" AND (injury OR injured OR lineup OR "starting pitcher" OR suspended OR "day-to-day")`
+    );
+    if (specificResults.length > 0) return specificResults;
+
+    // Fallback: broader recent-news search if nothing specific was found,
+    // so we don't lose all coverage on days without breaking news.
+    return await runQuery(`"${teamName}" MLB`);
   } catch {
     return [];
   }
@@ -107,6 +121,8 @@ Tu tarea: evalúa si alguna de estas noticias es relevante para el partido (ej. 
 Si NINGUNA noticia es relevante o aplicable a este partido específico, responde con el análisis previo SIN CAMBIOS.
 
 Si alguna noticia SÍ es relevante, actualiza el análisis (probabilidades, best_method, alternative_method, y cualquier campo afectado) reflejando ese nuevo contexto, y agrega un campo nuevo "news_impact" explicando qué noticia influyó y cómo cambió tu análisis.
+
+Antes de responder, verifica que todos los campos actualizados sean coherentes entre sí (el equipo favorecido en el Moneyline debe ser generalmente consistente con pitching_edge, batting_edge, proyecciones de carreras, y run_line, salvo razón específica justificada).
 
 Responde SOLO con el JSON completo actualizado (misma estructura que el análisis previo, agregando "news_impact" como string, o "news_impact": null si no hubo cambios), sin markdown ni texto adicional.`;
 

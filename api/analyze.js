@@ -1,8 +1,6 @@
 // api/analyze.js — Vercel Serverless Function
 // Fetches real MLB stats (team + probable pitchers + lineup if available) + calls Groq AI
 
-import { calculateMoneyline, calculateTotalRuns, calculateRunLine, calculateIndividualRuns, calculateFirstFiveInnings, calculateHCE, calculateFirstInningNRFI } from "./formulas.js";
-
 const MLB_BASE = "https://statsapi.mlb.com/api/v1";
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
 
@@ -75,8 +73,6 @@ async function fetchMLBStats(teamId) {
     saves: pStats.saves || "N/A",
     blownSaves: pStats.blownSaves || "N/A",
     rosterSize: roster?.roster?.length || "N/A",
-    // Fields needed for the statistical formulas (Moneyline, Total Runs, Run Line, HCE).
-    // wins/losses/gamesPlayed are filled in separately via fetchTeamRecord (standings endpoint).
     runsScored,
     runsAllowed,
     hits,
@@ -514,50 +510,13 @@ export default async function handler(req, res) {
   if (!homeId || !awayId) return res.status(400).json({ error: "Invalid team name" });
 
   try {
-    // 1. Fetch team-level stats + H2H + upcoming game info + win-loss records in parallel
-    const [homeStats, awayStats, h2h, gameInfo, homeRecord, awayRecord] = await Promise.all([
+    // 1. Fetch team-level stats + H2H + upcoming game info in parallel
+    const [homeStats, awayStats, h2h, gameInfo] = await Promise.all([
       fetchMLBStats(homeId),
       fetchMLBStats(awayId),
       fetchHeadToHead(homeId, awayId),
       fetchUpcomingGameInfo(homeId, awayId, requestedGamePk),
-      fetchTeamRecord(homeId),
-      fetchTeamRecord(awayId),
     ]);
-
-    // Calculate statistical formulas (Fase 2) — these become ground truth for the
-    // AI to adjust using same-day context (pitchers, weather, fatigue, injuries),
-    // rather than the AI estimating these numbers from scratch.
-    const formulaMoneyline = calculateMoneyline({
-      homeWins: homeRecord.wins, homeLosses: homeRecord.losses,
-      awayWins: awayRecord.wins, awayLosses: awayRecord.losses,
-      homeRunsScored: homeStats.runsScored, homeRunsAllowed: homeStats.runsAllowed,
-      awayRunsScored: awayStats.runsScored, awayRunsAllowed: awayStats.runsAllowed,
-    });
-
-    const formulaTotalRuns = calculateTotalRuns({
-      homeRunsScored: homeStats.runsScored, homeGamesPlayed: homeRecord.gamesPlayed, homeRunsAllowed: homeStats.runsAllowed,
-      awayRunsScored: awayStats.runsScored, awayGamesPlayed: awayRecord.gamesPlayed, awayRunsAllowed: awayStats.runsAllowed,
-    });
-
-    const formulaRunLine = calculateRunLine({
-      homeWinPct: formulaMoneyline.home_win_pct, awayWinPct: formulaMoneyline.away_win_pct,
-      projectedHomeRuns: formulaTotalRuns.projected_home_runs, projectedAwayRuns: formulaTotalRuns.projected_away_runs,
-    });
-
-    const formulaHomeIndividualRuns = calculateIndividualRuns({ projectedRuns: formulaTotalRuns.projected_home_runs });
-    const formulaAwayIndividualRuns = calculateIndividualRuns({ projectedRuns: formulaTotalRuns.projected_away_runs });
-
-    const formulaFirstFive = calculateFirstFiveInnings({
-      homeWinPct: formulaMoneyline.home_win_pct, awayWinPct: formulaMoneyline.away_win_pct,
-      projectedHomeRuns: formulaTotalRuns.projected_home_runs, projectedAwayRuns: formulaTotalRuns.projected_away_runs,
-    });
-
-    const formulaHCE = calculateHCE({
-      totalProjectedRuns: formulaTotalRuns.line,
-      homeAvg: homeStats.avg, awayAvg: awayStats.avg,
-      homeGamesPlayed: homeRecord.gamesPlayed, awayGamesPlayed: awayRecord.gamesPlayed,
-      homeHits: homeStats.hits, awayHits: awayStats.hits,
-    });
 
     // 2. Fetch probable pitcher stats (if known) + lineup (if published) + weather + bullpen fatigue + injuries
     let homePitcher = null, awayPitcher = null, lineup = null, weather = null;
@@ -577,23 +536,6 @@ export default async function handler(req, res) {
       lineup = lu;
       weather = wx;
     }
-
-    // Calculate NRFI/YRFI formula now that pitcher data is resolved.
-    // parseFloat safely returns NaN for "N/A" strings, which we convert to null
-    // so the formula correctly falls back to the historical base rate.
-    const parseStatOrNull = (val) => {
-      const parsed = parseFloat(val);
-      return isNaN(parsed) ? null : parsed;
-    };
-
-    const formulaNRFI = calculateFirstInningNRFI({
-      homeStarterWhip: parseStatOrNull(homePitcher?.whip),
-      homeStarterEra: parseStatOrNull(homePitcher?.era),
-      awayStarterWhip: parseStatOrNull(awayPitcher?.whip),
-      awayStarterEra: parseStatOrNull(awayPitcher?.era),
-      homeObp: parseStatOrNull(homeStats.obp),
-      awayObp: parseStatOrNull(awayStats.obp),
-    });
 
     // 3. Build prompt — prioritize starting pitcher data when available
     const pitcherBlock = (homePitcher || awayPitcher) ? `
@@ -654,15 +596,6 @@ EQUIPO VISITANTE — ${away}:
 - Bullpen: Salvamentos ${awayStats.saves} | Blown Saves ${awayStats.blownSaves}
 
 HEAD-TO-HEAD (temporada actual): ${home} ${h2h.homeWins}W - ${h2h.awayWins}W ${away} (${h2h.totalGames} juegos)
-
-CÁLCULO ESTADÍSTICO BASE (fórmulas sabermétricas validadas — Log5 + Pythagorean Expectation, NO generadas por IA):
-- Moneyline base: ${home} ${formulaMoneyline.home_win_pct}% — ${away} ${formulaMoneyline.away_win_pct}% (calculado con Log5 + Pythagorean Expectation + ajuste de local)
-- Total de carreras proyectado (base): ${formulaTotalRuns.line} (${home} ${formulaTotalRuns.projected_home_runs}, ${away} ${formulaTotalRuns.projected_away_runs})
-- Run Line base: favorito ${formulaRunLine.favored_side === "home" ? home : away} ${formulaRunLine.spread}, probabilidad de cubrir ${formulaRunLine.cover_probability_pct}%
-- Carreras individuales base: ${home} línea ${formulaHomeIndividualRuns.line} | ${away} línea ${formulaAwayIndividualRuns.line}
-- First 5 Innings base: ${home} ${formulaFirstFive.home_f5_win_pct}% — ${away} ${formulaFirstFive.away_f5_win_pct}% (proyección: ${formulaFirstFive.projected_home_f5_runs} vs ${formulaFirstFive.projected_away_f5_runs} carreras en 5 innings)
-- HCE base (Carreras+Hits+Errores combinado): línea ${formulaHCE.line} (proyección: ${formulaHCE.projected_hits} hits + ${formulaHCE.projected_errors} errores + ${formulaTotalRuns.line} carreras)
-- NRFI/YRFI base (SI/NO 1er inning): probabilidad de NO anotar (NRFI) ${formulaNRFI.nrfi_probability_pct}% — calculado desde tasa histórica MLB (57%) ajustada por WHIP/ERA de ambos abridores probables y OBP de ambos lineups (${formulaNRFI.method})
 ${pitcherBlock}${lineupBlock}${weatherBlock}${fatigueBlock}${injuryBlock}
 
 Responde SOLO con JSON sin markdown, estructura exacta:
@@ -672,9 +605,9 @@ Responde SOLO con JSON sin markdown, estructura exacta:
   "away_win_pct": <entero 0-100, debe sumar 100 con home_win_pct>,
 
   "first_inning": {
-    "scores": "<SI|NO. SI significa que anotan (YRFI). NO significa 0-0 combinado (NRFI). Usa como referencia el 'NRFI/YRFI base' calculado arriba: si nrfi_probability_pct es mayor a 50%, el pick base sería NO; si es menor a 50%, el pick base sería SI. Ajusta según el contexto específico del día>",
-    "confidence_pct": <entero 0-100. Si tu pick final es NO, usa directamente o cerca del nrfi_probability_pct base; si es SI, usa 100 menos ese valor como referencia, ajustando con el contexto>,
-    "reasoning": "<justifica citando el cálculo NRFI/YRFI base y qué factor del día (abridores, lineup) motivó mantener o ajustar ese número, 1 oración>"
+    "scores": "<SI|NO. SI significa que AL MENOS UN equipo anota en el 1er inning (combinado). NO significa que el 1er inning completo termina 0-0 entre ambos equipos>",
+    "confidence_pct": <entero 0-100>,
+    "reasoning": "<justifica con abridores probables y tendencia ofensiva del primer tercio del lineup rival, 1 oración>"
   },
 
   "total_runs": {
@@ -685,21 +618,21 @@ Responde SOLO con JSON sin markdown, estructura exacta:
   },
 
   "home_team_runs": {
-    "line": <decimal ej 4.5. Usa como referencia la 'Carreras individuales base' de ${home} calculada arriba, ajustando según abridor rival y contexto del día>,
+    "line": <decimal ej 4.5>,
     "pick": "<OVER|UNDER>",
     "confidence_pct": <entero 0-100>,
     "reasoning": "<carreras SOLO del equipo local vs línea, basado en bateo local vs abridor visitante, mencionando si te alejaste de la línea base y por qué, 1 oración>"
   },
 
   "away_team_runs": {
-    "line": <decimal ej 3.5. Usa como referencia la 'Carreras individuales base' de ${away} calculada arriba, ajustando según abridor rival y contexto del día>,
+    "line": <decimal ej 3.5>,
     "pick": "<OVER|UNDER>",
     "confidence_pct": <entero 0-100>,
     "reasoning": "<carreras SOLO del equipo visitante vs línea, basado en bateo visitante vs abridor local, mencionando si te alejaste de la línea base y por qué, 1 oración>"
   },
 
   "first_five_innings": {
-    "winner": "<home|away, usa como referencia el 'First 5 Innings base' calculado arriba, ajustando si el abridor confirmado de alguno de los equipos cambia el panorama>",
+    "winner": "<home|away>",
     "confidence_pct": <entero 0-100>,
     "reasoning": "<quién va ganando al final del inning 5 (first 5), basado principalmente en la comparación de abridores probables ya que suelen retirarse cerca del inning 5, mencionando si te alejaste del cálculo base y por qué, 1 oración>"
   },
@@ -719,7 +652,7 @@ Responde SOLO con JSON sin markdown, estructura exacta:
   },
 
   "hce_total": {
-    "line": <decimal ej 21.5. Usa como referencia el 'HCE base' calculado arriba, ajustando según contexto del día>,
+    "line": <decimal ej 21.5>,
     "pick": "<OVER|UNDER>",
     "confidence_pct": <entero 0-100>,
     "reasoning": "<total combinado de Carreras+Hits+Errores de AMBOS equipos vs línea. Suele ser un número más alto que la línea de carreras solas, ya que incluye hits y errores. Menciona si te alejaste de la línea base y por qué, 1 oración>"
@@ -727,7 +660,7 @@ Responde SOLO con JSON sin markdown, estructura exacta:
 
   "run_line": {
     "favored_team": "<home|away, el equipo con mayor % en home_win_pct/away_win_pct>",
-    "spread": "<-1.5 o -2.5, usa como referencia el spread y probabilidad de cubrir calculados en 'Run Line base' de arriba, ajustando si el contexto del día lo justifica>",
+    "spread": "<-1.5 o -2.5, el hándicap que se le resta al favorito>",
     "covers": "<SI|NO, si el favorito gana por más carreras que el spread>",
     "confidence_pct": <entero 0-100>,
     "reasoning": "<justifica si el margen de victoria esperado del favorito supera el spread, considerando fuerza ofensiva y bullpen rival, mencionando si te alejaste del cálculo base y por qué, 1 oración>"
@@ -767,7 +700,11 @@ Responde SOLO con JSON sin markdown, estructura exacta:
 
 REGLAS IMPORTANTES:
 - home_win_pct + away_win_pct = 100 exactamente.
-- FASE 2 — RESPETO AL CÁLCULO ESTADÍSTICO BASE: los valores de "Moneyline base", "Total de carreras proyectado (base)", "Run Line base", "Carreras individuales base", "First 5 Innings base", "HCE base" y "NRFI/YRFI base" en la sección de datos son resultado de fórmulas sabermétricas validadas (Log5, Pythagorean Expectation, proyecciones ajustadas por matchup, modelo NRFI estándar de la industria), no estimaciones tuyas. DEBES usarlos como punto de partida real para home_win_pct, total_runs.line, run_line.spread/cover, home_team_runs.line, away_team_runs.line, first_five_innings.winner, hce_total.line, y first_inning.scores/confidence_pct — no los ignores ni generes números completamente distintos sin razón. SÍ puedes y DEBES ajustarlos con el contexto específico del día (abridor confirmado fuerte/débil, clima favorable/desfavorable a carreras, bullpen fatigado, lesiones de jugadores clave) — ese es precisamente tu valor agregado sobre el cálculo puramente estadístico. Un ajuste de más de 10 puntos porcentuales (o más de 1.5 en líneas de carreras) respecto al base debe estar claramente justificado en el "reasoning" correspondiente citando el factor específico que lo motiva.
+- VERIFICACIÓN DE COHERENCIA (OBLIGATORIA, último paso antes de responder): antes de finalizar el JSON, revisa TODOS los campos generados en conjunto y verifica que cuenten una historia coherente. En particular:
+  - El equipo favorecido en home_win_pct/away_win_pct debe ser generalmente el mismo equipo favorecido en pitching_edge, batting_edge, home_team_runs/away_team_runs (mayor proyección de carreras), run_line.favored_team, y first_five_innings.winner — salvo que exista una razón real y específica para que un mercado puntual diverja (ej. el equipo con menor probabilidad de ganar el juego completo tiene un abridor excepcional que lo hace más fuerte SOLO en first 5 innings). Si no hay una razón real, ajusta los campos para que sean coherentes entre sí.
+  - Si detectas una contradicción sin justificación (ej. el equipo con 60%+ de Moneyline aparece con menor proyección de carreras que su rival, o pitching_edge/batting_edge favorecen abiertamente al equipo con menor % de victoria), corrige el campo que está en desacuerdo antes de responder, o explica explícitamente en su "reasoning" por qué diverge del resto del análisis.
+  - analyst_take debe resumir una conclusión consistente con el resto de los campos, no contradecir al equipo que los demás campos favorecen.
+  - Esta revisión de coherencia es un paso interno tuyo — no agregues ningún campo nuevo al JSON para explicarla, simplemente asegúrate de que el JSON final ya sea coherente.
 - "best_method" es el campo MÁS IMPORTANTE para el sistema de picks: evalúa los 8 métodos disponibles (JC=juego completo/moneyline, H=first 5 innings, K=ponches del ABRIDOR probable de un equipo, Solo=carreras de un equipo específico, SI_NO=anotación combinada en el 1er inning, HCE=total carreras+hits+errores combinado, Linea=total carreras combinado, RL=run line con spread).
 - CÓMO ELEGIR "best_method" (regla objetiva y verificable, sin sesgo hacia ningún mercado en particular): genera PRIMERO los 8 campos individuales de mercado (first_inning, total_runs, home_team_runs, away_team_runs, first_five_innings, strikeouts_home, strikeouts_away, hce_total, run_line) con sus respectivos confidence_pct realistas y diferenciados. SOLO DESPUÉS de tener esos 8 números generados, compara los 8 confidence_pct entre sí y elige "best_method" = el mercado con el número más alto. El confidence_pct que reportes dentro de "best_method" DEBE ser EXACTAMENTE IGUAL (el mismo número, sin redondear ni ajustar) al confidence_pct que ya escribiste en el campo individual correspondiente a ese mercado — nunca inventes un número nuevo para "best_method" que no coincida con su campo fuente. Por ejemplo, si eliges "SI_NO" como best_method porque first_inning.confidence_pct fue 60, entonces best_method.confidence_pct también debe ser 60, no un valor distinto. Esta consistencia es OBLIGATORIA y se verifica automáticamente.
 - "alternative_method" sigue la misma regla: su confidence_pct debe coincidir exactamente con el campo individual del segundo mercado más alto, generado con el mismo criterio.
@@ -841,16 +778,6 @@ REGLAS IMPORTANTES:
         injuries: { home: homeInjuries, away: awayInjuries },
         gameDate: gameInfo?.gameDate || null,
         gamePk: gameInfo?.gamePk || null,
-      },
-      formulaBaseline: {
-        moneyline: formulaMoneyline,
-        totalRuns: formulaTotalRuns,
-        runLine: formulaRunLine,
-        homeIndividualRuns: formulaHomeIndividualRuns,
-        awayIndividualRuns: formulaAwayIndividualRuns,
-        firstFive: formulaFirstFive,
-        hce: formulaHCE,
-        nrfi: formulaNRFI,
       },
     });
   } catch (err) {
