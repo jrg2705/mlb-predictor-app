@@ -11,6 +11,9 @@
     },
     "api/news-context.js": {
       "maxDuration": 30
+    },
+    "api/expert-picks.js": {
+      "maxDuration": 45
     }
   },
   "rewrites": [
