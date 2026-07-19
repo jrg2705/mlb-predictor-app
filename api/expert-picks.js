@@ -7,7 +7,7 @@
 // Only the "K" (Ponches) market is capped at 4 picks max, per sportsbook rules
 // the user specified. All other markets are chosen freely by confidence/quality.
 
-const GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const MAX_PONCHES_PICKS = 4;
 
 function buildGameSummary(entry) {
@@ -116,20 +116,37 @@ Responde SOLO con un JSON válido, sin markdown, con esta estructura exacta:
 
 Ordena "picks" del que consideres de MAYOR a MENOR confianza real.`;
 
-    const geminiRes = await fetch(`${GEMINI_API}?key=${apiKey}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.4,
-          maxOutputTokens: 4000,
-          response_mime_type: "application/json",
-        },
-      }),
-    });
+    const callGemini = async (modelName) => {
+      const url = `${GEMINI_API_BASE}/${modelName}:generateContent?key=${apiKey}`;
+      const geminiRes = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.4,
+            maxOutputTokens: 4000,
+            response_mime_type: "application/json",
+          },
+        }),
+      });
+      const geminiData = await geminiRes.json();
+      return { geminiRes, geminiData };
+    };
 
-    const geminiData = await geminiRes.json();
+    // Try the primary model first; if it's unavailable/deprecated (404 or explicit
+    // "no longer available" message), automatically retry with Google's model-agnostic
+    // "latest" alias, which self-updates as Google retires specific model versions —
+    // this avoids repeating today's issue when Google next deprecates a model.
+    let { geminiRes, geminiData } = await callGemini("gemini-3.5-flash");
+
+    const isModelUnavailable = geminiRes.status === 404 ||
+      (geminiData.error?.message || "").toLowerCase().includes("no longer available");
+
+    if (isModelUnavailable) {
+      console.log("Primary Gemini model unavailable, retrying with gemini-flash-latest");
+      ({ geminiRes, geminiData } = await callGemini("gemini-flash-latest"));
+    }
 
     if (!geminiRes.ok || geminiData.error) {
       const errMsg = geminiData.error?.message || `Gemini respondió con estado ${geminiRes.status}`;
