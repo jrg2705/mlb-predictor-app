@@ -319,6 +319,10 @@ export default function MLBPredictor() {
   const [picksCount, setPicksCount] = useState(1);
   const [generatedPicks, setGeneratedPicks] = useState(null);
   const [verifying, setVerifying] = useState(false);
+  const [expertPicks, setExpertPicks] = useState(null); // { picks, overallAnalysis } from Gemini
+  const [loadingExpertPicks, setLoadingExpertPicks] = useState(false);
+  const [expertPicksError, setExpertPicksError] = useState("");
+  const [expertPicksCount, setExpertPicksCount] = useState(5);
 
   const [notifPermission, setNotifPermission] = useState(
     typeof Notification !== "undefined" ? Notification.permission : "unsupported"
@@ -914,6 +918,28 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
 
   const handleGeneratePicks = () => {
     setGeneratedPicks(buildTopPicks(picksCount));
+  };
+
+  const handleGenerateExpertPicks = async () => {
+    if (todayAnalyzed.length === 0) return;
+    setLoadingExpertPicks(true);
+    setExpertPicksError("");
+    setExpertPicks(null);
+
+    try {
+      const res = await fetch("/api/expert-picks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ games: todayAnalyzed, pickCount: expertPicksCount }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error al generar picks expertos");
+      setExpertPicks(data);
+    } catch (e) {
+      setExpertPicksError(`Error: ${e.message}`);
+    } finally {
+      setLoadingExpertPicks(false);
+    }
   };
 
   return (
@@ -1724,6 +1750,106 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
           <p style={{ textAlign: "center", fontSize: "11px", color: "#3a5a78", marginTop: "16px" }}>
             Selección aleatoria entre partidos ya analizados · Basado en el equipo favorecido de cada análisis con datos reales de MLB.
           </p>
+
+          <div style={{ borderTop: "1px solid #1e3a52", marginTop: "28px", paddingTop: "24px" }}>
+            <h2 style={{ fontSize: "16px", margin: "0 0 6px", color: "#F0F4F8" }}>🧠 Picks Expertos (IA independiente)</h2>
+            <p style={{ fontSize: "11px", color: "#3a5a78", marginBottom: "16px" }}>
+              Un analista de IA independiente (Gemini) revisa TODOS los mercados de cada partido analizado hoy —no solo el mejor método—
+              y arma los picks con criterio propio, priorizando coherencia entre mercados y calidad sobre porcentaje aislado.
+              Solo el mercado de Ponches está limitado a {4} picks; los demás se eligen libremente por calidad.
+            </p>
+
+            {todayAnalyzed.length === 0 ? (
+              <p style={{ textAlign: "center", color: "#7a9ab8", fontSize: "13px", padding: "20px 0" }}>
+                Aún no has analizado ningún partido hoy.
+              </p>
+            ) : (
+              <>
+                <div style={{
+                  background: "#142235", border: "1px solid #1e3a52", borderRadius: "12px",
+                  padding: "20px", marginBottom: "16px"
+                }}>
+                  <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "10px" }}>
+                    ¿CUÁNTOS PICKS EXPERTOS?
+                  </div>
+                  <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+                    <select
+                      value={expertPicksCount}
+                      onChange={e => setExpertPicksCount(Number(e.target.value))}
+                      style={{
+                        background: "#0f1e2e", border: "1px solid #1e3a52", color: "#F0F4F8",
+                        borderRadius: "8px", padding: "10px 14px", fontSize: "14px", cursor: "pointer", outline: "none",
+                      }}
+                    >
+                      {Array.from({ length: Math.max(1, Math.min(15, todayAnalyzed.length)) }, (_, i) => i + 1).map(n => (
+                        <option key={n} value={n}>{n} {n === 1 ? "pick" : "picks"}</option>
+                      ))}
+                    </select>
+                    <button onClick={handleGenerateExpertPicks} disabled={loadingExpertPicks} style={{
+                      background: loadingExpertPicks ? "#1e3a52" : "linear-gradient(135deg, #4A90D9, #1e3a52)",
+                      border: "none", color: "#fff", borderRadius: "8px", padding: "10px 20px", fontSize: "13px",
+                      fontWeight: 700, cursor: loadingExpertPicks ? "not-allowed" : "pointer",
+                    }}>
+                      {loadingExpertPicks ? "🔄 Analizando…" : "🧠 Generar Picks Expertos"}
+                    </button>
+                  </div>
+                  <p style={{ fontSize: "11px", color: "#4a6a88", marginTop: "10px", marginBottom: 0 }}>
+                    {todayAnalyzed.length} {todayAnalyzed.length === 1 ? "partido analizado" : "partidos analizados"} hoy disponibles para evaluar
+                  </p>
+                </div>
+
+                {expertPicksError && (
+                  <p style={{ color: "#e74c3c", fontSize: "12px", textAlign: "center", marginBottom: "14px" }}>{expertPicksError}</p>
+                )}
+
+                {expertPicks && expertPicks.picks?.length > 0 && (
+                  <div style={{ animation: "fadeIn .4s ease" }}>
+                    {expertPicks.overallAnalysis && (
+                      <div style={{
+                        background: "linear-gradient(135deg, #142235, #16314a)", border: "1px solid #4A90D9",
+                        borderRadius: "12px", padding: "16px", marginBottom: "16px",
+                      }}>
+                        <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.1em", marginBottom: "8px" }}>
+                          🧠 ANÁLISIS GENERAL DEL DÍA
+                        </div>
+                        <p style={{ fontSize: "13px", color: "#c5d8ea", margin: 0, lineHeight: 1.5, fontStyle: "italic" }}>
+                          {expertPicks.overallAnalysis}
+                        </p>
+                      </div>
+                    )}
+                    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                      {expertPicks.picks.map((pick, idx) => (
+                        <div key={idx} style={{
+                          background: "linear-gradient(135deg, #142235, #1a2d4a)", border: "1px solid #4A90D9",
+                          borderRadius: "12px", padding: "16px",
+                        }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "8px" }}>
+                            <div style={{
+                              width: "26px", height: "26px", borderRadius: "50%", background: "#4A90D9",
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              fontSize: "12px", fontWeight: 700, color: "#0D1B2A", flexShrink: 0,
+                            }}>{idx + 1}</div>
+                            <div style={{ fontSize: "10px", color: "#7a9ab8" }}>
+                              {pick.matchup} · <span style={{ color: "#4A90D9" }}>{METHOD_LABELS[pick.market] || pick.market}</span>
+                            </div>
+                          </div>
+                          <div style={{ fontSize: "15px", fontWeight: 700, color: "#F4A261", marginBottom: "8px" }}>
+                            🧠 {pick.pick_summary}
+                          </div>
+                          <div style={{ marginBottom: "8px" }}>
+                            <ConfidenceBadge pct={pick.confidence_pct} />
+                          </div>
+                          <p style={{ fontSize: "12px", color: "#c5d8ea", margin: 0, lineHeight: 1.5, fontStyle: "italic" }}>
+                            {pick.expert_reasoning}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
       )}
 
