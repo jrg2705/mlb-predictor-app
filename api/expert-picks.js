@@ -125,7 +125,7 @@ Ordena "picks" del que consideres de MAYOR a MENOR confianza real.`;
           contents: [{ role: "user", parts: [{ text: prompt }] }],
           generationConfig: {
             temperature: 0.4,
-            maxOutputTokens: 4000,
+            maxOutputTokens: 8000,
             response_mime_type: "application/json",
           },
         }),
@@ -154,14 +154,22 @@ Ordena "picks" del que consideres de MAYOR a MENOR confianza real.`;
       return res.status(502).json({ error: `Error de Gemini AI: ${errMsg}` });
     }
 
+    const finishReason = geminiData.candidates?.[0]?.finishReason;
     const text = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "";
     const clean = text.replace(/```json|```/g, "").trim();
+
+    if (finishReason === "MAX_TOKENS") {
+      console.error("Gemini response truncated by MAX_TOKENS. Raw length:", clean.length);
+      return res.status(502).json({
+        error: "Gemini cortó la respuesta por límite de tokens (demasiados partidos para procesar de una vez). Intenta con menos picks solicitados, o vuelve a intentar.",
+      });
+    }
 
     let result;
     try {
       result = JSON.parse(clean);
     } catch (parseErr) {
-      console.error("Gemini JSON parse failed. Raw (first 500 chars):", clean.slice(0, 500));
+      console.error("Gemini JSON parse failed. finishReason:", finishReason, "Raw (first 800 chars):", clean.slice(0, 800));
       return res.status(502).json({
         error: "Gemini devolvió una respuesta mal formada. Intenta de nuevo.",
         details: parseErr.message,
