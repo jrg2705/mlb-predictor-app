@@ -137,23 +137,73 @@ function evaluateBestMethod(bestMethod, gameResult) {
   }
 }
 
-function recordOutcome(entry, gameResult) {
+// Builds one verifiable object per market field in an analysis (all 8, not just
+// best_method), in the same shape evaluateBestMethod() expects (market/side/pick/
+// line/spread), so each can be checked against the real game result independently.
+function buildVerifiableMarketsFromAnalysis(analysis, home, away) {
+  const a = analysis;
+  const markets = [];
+
+  if (a.first_inning?.scores) {
+    markets.push({ market: "SI_NO", side: "combined", pick: a.first_inning.scores, line: null, spread: null, confidence_pct: a.first_inning.confidence_pct });
+  }
+  if (a.total_runs?.pick) {
+    markets.push({ market: "Linea", side: "combined", pick: a.total_runs.pick, line: a.total_runs.line, spread: null, confidence_pct: a.total_runs.confidence_pct });
+  }
+  if (a.home_team_runs?.pick) {
+    markets.push({ market: "Solo", side: "home", pick: a.home_team_runs.pick, line: a.home_team_runs.line, spread: null, confidence_pct: a.home_team_runs.confidence_pct });
+  }
+  if (a.away_team_runs?.pick) {
+    markets.push({ market: "Solo", side: "away", pick: a.away_team_runs.pick, line: a.away_team_runs.line, spread: null, confidence_pct: a.away_team_runs.confidence_pct });
+  }
+  if (a.first_five_innings?.winner) {
+    markets.push({ market: "H", side: a.first_five_innings.winner, pick: null, line: null, spread: null, confidence_pct: a.first_five_innings.confidence_pct });
+  }
+  if (a.strikeouts_home?.pick && a.strikeouts_home?.line != null) {
+    markets.push({ market: "K", side: "home", pick: a.strikeouts_home.pick, line: a.strikeouts_home.line, spread: null, confidence_pct: a.strikeouts_home.confidence_pct });
+  }
+  if (a.strikeouts_away?.pick && a.strikeouts_away?.line != null) {
+    markets.push({ market: "K", side: "away", pick: a.strikeouts_away.pick, line: a.strikeouts_away.line, spread: null, confidence_pct: a.strikeouts_away.confidence_pct });
+  }
+  if (a.hce_total?.pick) {
+    markets.push({ market: "HCE", side: "combined", pick: a.hce_total.pick, line: a.hce_total.line, spread: null, confidence_pct: a.hce_total.confidence_pct });
+  }
+  if (a.run_line?.covers) {
+    markets.push({ market: "RL", side: a.run_line.favored_team, pick: a.run_line.covers, line: null, spread: a.run_line.spread, confidence_pct: a.run_line.confidence_pct });
+  }
+  if (a.home_win_pct != null && a.away_win_pct != null) {
+    const favoredSide = a.home_win_pct >= a.away_win_pct ? "home" : "away";
+    markets.push({ market: "JC", side: favoredSide, pick: null, line: null, spread: null, confidence_pct: Math.max(a.home_win_pct, a.away_win_pct) });
+  }
+
+  return markets;
+}
+
+// Verifies EVERY market in an analysis (all ~9 fields, not just best_method)
+// against the real game result, and records each outcome under its own market
+// type in the Track Record — so the breakdown reflects true per-market accuracy
+// across everything analyzed, not just whichever was picked as "best" that day.
+function recordAllMarketOutcomes(entry, gameResult) {
   const record = loadTrackRecord();
-  const bestMethod = entry.analysis?.best_method;
-  const wasCorrect = evaluateBestMethod(bestMethod, gameResult);
+  const markets = buildVerifiableMarketsFromAnalysis(entry.analysis, entry.home, entry.away);
 
-  // If we can't evaluate this method (missing data/unsupported), skip counting it
-  if (wasCorrect === null) return record;
+  markets.forEach(m => {
+    const wasCorrect = evaluateBestMethod(m, gameResult);
+    if (wasCorrect === null) return; // skip unverifiable markets (missing data)
 
-  const confidencePct = bestMethod?.confidence_pct ?? 0;
-  const band = confidenceBand(confidencePct);
+    record.total += 1;
+    if (wasCorrect) record.correct += 1;
 
-  record.total += 1;
-  if (wasCorrect) record.correct += 1;
+    const band = confidenceBand(m.confidence_pct ?? 0);
+    if (!record.byBand[band]) record.byBand[band] = { total: 0, correct: 0 };
+    record.byBand[band].total += 1;
+    if (wasCorrect) record.byBand[band].correct += 1;
 
-  if (!record.byBand[band]) record.byBand[band] = { total: 0, correct: 0 };
-  record.byBand[band].total += 1;
-  if (wasCorrect) record.byBand[band].correct += 1;
+    if (!record.byMarket) record.byMarket = {};
+    if (!record.byMarket[m.market]) record.byMarket[m.market] = { total: 0, correct: 0 };
+    record.byMarket[m.market].total += 1;
+    if (wasCorrect) record.byMarket[m.market].correct += 1;
+  });
 
   localStorage.setItem(TRACK_RECORD_KEY, JSON.stringify(record));
   return record;
@@ -371,7 +421,7 @@ export default function MLBPredictor() {
       pending.forEach(entry => {
         const gameResult = resultsByPk[entry.gamePk];
         if (gameResult && gameResult.final) {
-          record = recordOutcome(entry, gameResult);
+          record = recordAllMarketOutcomes(entry, gameResult);
           const bestMethodCorrect = evaluateBestMethod(entry.analysis?.best_method, gameResult);
           updatedHistory = updatedHistory.map(e =>
             e.id === entry.id
@@ -380,7 +430,7 @@ export default function MLBPredictor() {
                   verified: true,
                   actualWinner: gameResult.winner,
                   actualScore: `${gameResult.awayRuns}-${gameResult.homeRuns}`,
-                  bestMethodCorrect, // true | false | null (null = couldn't be evaluated)
+                  bestMethodCorrect, // true | false | null (null = couldn't be evaluated) — kept for the History tab badge
                 }
               : e
           );
@@ -1641,6 +1691,37 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                       </div>
                     );
                   })}
+                </div>
+              </div>
+
+              <div style={{ background: "#142235", border: "1px solid #1e3a52", borderRadius: "12px", padding: "20px", marginTop: "14px" }}>
+                <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "6px" }}>
+                  PRECISIÓN POR MERCADO
+                </div>
+                <p style={{ fontSize: "10px", color: "#4a6a88", marginTop: 0, marginBottom: "14px" }}>
+                  Se evalúan los 8 mercados de cada partido analizado, no solo el elegido como Mejor Método
+                </p>
+                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                  {Object.entries(trackRecord.byMarket || {})
+                    .filter(([, data]) => data.total > 0)
+                    .sort(([, a], [, b]) => (b.correct / b.total) - (a.correct / a.total))
+                    .map(([market, data]) => {
+                      const pct = Math.round((data.correct / data.total) * 100);
+                      return (
+                        <div key={market}>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", marginBottom: "4px" }}>
+                            <span style={{ color: "#c5d8ea" }}>{METHOD_LABELS[market] || market}</span>
+                            <span style={{ color: "#F0F4F8", fontWeight: 700 }}>{pct}% ({data.correct}/{data.total})</span>
+                          </div>
+                          <WinBar pct={pct} color={pct >= 55 ? "#2D6A4F" : "#c0392b"} />
+                        </div>
+                      );
+                    })}
+                  {Object.keys(trackRecord.byMarket || {}).length === 0 && (
+                    <p style={{ fontSize: "12px", color: "#7a9ab8", textAlign: "center", margin: 0 }}>
+                      Aún no hay suficientes partidos verificados para mostrar este desglose.
+                    </p>
+                  )}
                 </div>
               </div>
 
