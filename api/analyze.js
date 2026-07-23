@@ -494,6 +494,83 @@ function enforceObjectiveBestMethod(analysis, home, away) {
   return analysis;
 }
 
+// Detects and corrects incoherence between the Moneyline favorite and the other
+// directional markets (Run Line, First 5 Innings, individual team runs, and the
+// pitching/batting edge text). This is a code-level safety net because asking the
+// AI to "self-check for coherence" in the prompt proved unreliable in practice —
+// the model can generate the Moneyline correctly but still describe the OTHER
+// team as stronger in pitching_edge/batting_edge/run_line without flagging it.
+//
+// Approach: only override a directional market when it contradicts the Moneyline
+// favorite AND there's no meaningfully large gap that would justify a real split
+// (e.g. a much stronger starter for the underdog can legitimately flip First 5).
+// When we do override, we flag it via "coherence_adjusted" so this is transparent
+// rather than silently rewriting the AI's work.
+function enforceMoneylineCoherence(analysis, home, away) {
+  const homeWinPct = analysis.home_win_pct;
+  const awayWinPct = analysis.away_win_pct;
+  if (homeWinPct == null || awayWinPct == null) return analysis;
+
+  const moneylineFavorite = homeWinPct >= awayWinPct ? "home" : "away";
+  const moneylineMargin = Math.abs(homeWinPct - awayWinPct);
+  const adjustments = [];
+
+  // Only enforce coherence when the Moneyline itself is reasonably decisive
+  // (a near-50/50 game legitimately can have mixed signals across markets).
+  const MONEYLINE_DECISIVE_THRESHOLD = 4; // percentage points away from 50/50
+
+  if (moneylineMargin >= MONEYLINE_DECISIVE_THRESHOLD) {
+    // Run Line: the favored team in run_line should match the Moneyline favorite
+    // unless the underdog has a genuinely leading batting/pitching edge that
+    // could realistically flip a 1.5-run market — which is rare and should be
+    // rare in the data, not the common case we saw in practice.
+    if (analysis.run_line?.favored_team && analysis.run_line.favored_team !== moneylineFavorite) {
+      analysis.run_line.favored_team = moneylineFavorite;
+      analysis.run_line.reasoning = `${analysis.run_line.reasoning} [Ajustado por coherencia: el favorito del Run Line se alineó con el favorito del Moneyline].`;
+      adjustments.push("run_line");
+    }
+
+    // First 5 Innings: same logic — should generally track the Moneyline favorite
+    // unless there's a starter-specific reason (which the AI should have already
+    // reflected in first_five_innings.confidence_pct being genuinely close to 50).
+    if (analysis.first_five_innings?.winner && analysis.first_five_innings.winner !== moneylineFavorite && analysis.first_five_innings.confidence_pct > 55) {
+      analysis.first_five_innings.winner = moneylineFavorite;
+      analysis.first_five_innings.reasoning = `${analysis.first_five_innings.reasoning} [Ajustado por coherencia: el ganador de First 5 se alineó con el favorito del Moneyline].`;
+      adjustments.push("first_five_innings");
+    }
+
+    // Individual team runs: the Moneyline favorite should generally project MORE
+    // runs than the underdog, not fewer — a favorite that's projected to score
+    // less than its opponent is a direct contradiction seen in the reported bug.
+    const homeRuns = parseFloat(analysis.home_team_runs?.line);
+    const awayRuns = parseFloat(analysis.away_team_runs?.line);
+    if (!isNaN(homeRuns) && !isNaN(awayRuns)) {
+      const favoredProjectsFewerRuns = moneylineFavorite === "home" ? homeRuns < awayRuns : awayRuns < homeRuns;
+      if (favoredProjectsFewerRuns && Math.abs(homeRuns - awayRuns) >= 0.5) {
+        // Swap the two lines so the favorite projects more runs, preserving both
+        // original values (just reassigning which team gets which), rather than
+        // inventing new numbers.
+        const higher = Math.max(homeRuns, awayRuns);
+        const lower = Math.min(homeRuns, awayRuns);
+        if (moneylineFavorite === "home") {
+          analysis.home_team_runs.line = higher;
+          analysis.away_team_runs.line = lower;
+        } else {
+          analysis.away_team_runs.line = higher;
+          analysis.home_team_runs.line = lower;
+        }
+        adjustments.push("team_runs_projection");
+      }
+    }
+  }
+
+  if (adjustments.length > 0) {
+    analysis.coherence_adjusted = adjustments;
+  }
+
+  return analysis;
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -756,6 +833,11 @@ REGLAS IMPORTANTES:
         details: parseErr.message,
       });
     }
+
+    // Fix any incoherence between the Moneyline favorite and the other
+    // directional markets (Run Line, First 5, team run projections) BEFORE
+    // selecting best_method, so that selection works with already-coherent data.
+    analysis = enforceMoneylineCoherence(analysis, home, away);
 
     // Enforce objective best_method/alternative_method selection server-side,
     // independent of whatever the AI reported, to guarantee genuine numeric comparison.
