@@ -1266,6 +1266,15 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                 </p>
               )}
 
+              {result.coherence_adjusted?.length > 0 && (
+                <p style={{
+                  fontSize: "11px", color: "#F4A261", textAlign: "center",
+                  marginBottom: "14px", padding: "0 8px"
+                }}>
+                  ⚖️ Se ajustaron {result.coherence_adjusted.length} campo(s) para mantener coherencia con el Moneyline
+                </p>
+              )}
+
               <div style={{ background: "#142235", border: "1px solid #1e3a52", borderRadius: "12px", padding: "20px", marginBottom: "14px" }}>
                 <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "14px" }}>
                   PROBABILIDADES DE VICTORIA (MONEYLINE)
