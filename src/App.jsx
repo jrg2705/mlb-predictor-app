@@ -840,6 +840,50 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
     URL.revokeObjectURL(url);
   };
 
+  const handleExportStandings = () => {
+    if (!standings?.divisions) return;
+
+    const today = new Date();
+    const dateStr = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
+
+    const lines = [
+      "=".repeat(50),
+      "MLB PREDICTOR — TABLA DE POSICIONES",
+      `Temporada Regular ${standings.season || today.getFullYear()}`,
+      today.toLocaleDateString("es-ES", { weekday: "long", day: "numeric", month: "long", year: "numeric" }),
+      "=".repeat(50),
+      "",
+      "GB = juegos detrás del líder · Últ.10 = récord últimos 10 juegos · Rest. = juegos restantes",
+      "",
+    ];
+
+    Object.entries(standings.divisions)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .forEach(([divName, divData]) => {
+        lines.push(`--- ${divName} (${divData.league}) ---`);
+        divData.teams.forEach((team, idx) => {
+          const marker = idx === 0 ? "🥇 " : "   ";
+          lines.push(
+            `${marker}${team.name.padEnd(24)} G:${String(team.wins).padStart(3)} P:${String(team.losses).padStart(3)} GB:${String(team.gamesBack).padStart(4)} Últ.10:${team.last10.padStart(4)} Racha:${team.streak.padStart(3)} Rest:${String(team.gamesRemaining).padStart(3)}`
+          );
+        });
+        lines.push("");
+      });
+
+    lines.push("-".repeat(50));
+    lines.push("Generado por MLB Predictor · MLB Stats API");
+
+    const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `mlb_posiciones_${dateStr}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   // Max picks allowed from the same market in a single Top Picks generation —
   // mirrors typical sportsbook combined-parlay restrictions.
   const MAX_PER_MARKET = 4;
@@ -1949,12 +1993,22 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
             <h2 style={{ fontSize: "16px", margin: 0, color: "#F0F4F8" }}>
               🏆 Posiciones — Temporada Regular {standings?.season || new Date().getFullYear()}
             </h2>
-            <button onClick={loadStandings} disabled={loadingStandings} style={{
-              background: "#142235", border: "1px solid #1e3a52", color: "#4A90D9",
-              borderRadius: "6px", padding: "6px 12px", fontSize: "11px", cursor: "pointer",
-            }}>
-              {loadingStandings ? "..." : "🔄"}
-            </button>
+            <div style={{ display: "flex", gap: "8px" }}>
+              {standings?.divisions && (
+                <button onClick={handleExportStandings} style={{
+                  background: "#142235", border: "1px solid #2D6A4F", color: "#2D6A4F",
+                  borderRadius: "6px", padding: "6px 10px", fontSize: "11px", cursor: "pointer", fontWeight: 600,
+                }}>
+                  📄
+                </button>
+              )}
+              <button onClick={loadStandings} disabled={loadingStandings} style={{
+                background: "#142235", border: "1px solid #1e3a52", color: "#4A90D9",
+                borderRadius: "6px", padding: "6px 12px", fontSize: "11px", cursor: "pointer",
+              }}>
+                {loadingStandings ? "..." : "🔄"}
+              </button>
+            </div>
           </div>
           <p style={{ fontSize: "11px", color: "#3a5a78", marginBottom: "18px" }}>
             GB = juegos detrás del líder · Últ. 10 = récord en los últimos 10 juegos · Rest. = juegos restantes en temporada regular (162 total)
