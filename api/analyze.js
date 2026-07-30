@@ -2,6 +2,7 @@
 // Fetches real MLB stats + formula bases (server-side) + Groq AI for day-of adjustment
 
 import { computeFormulaBases, formatBasesForPrompt } from "./compute-bases.js";
+import { formatBookLinesBlock } from "./format-book-lines.js";
 
 const MLB_BASE = "https://statsapi.mlb.com/api/v1";
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
@@ -81,7 +82,6 @@ async function fetchMLBStats(teamId) {
   };
 }
 
-// Single standings fetch for both teams (avoids double API call)
 async function fetchBothTeamRecords(homeId, awayId) {
   try {
     const season = new Date().getFullYear();
@@ -528,7 +528,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { home, away, gamePk: requestedGamePk } = req.body;
+  const { home, away, gamePk: requestedGamePk, bookLines = null } = req.body;
   if (!home || !away) return res.status(400).json({ error: "home and away teams are required" });
 
   const homeId = TEAM_IDS[home];
@@ -536,7 +536,6 @@ export default async function handler(req, res) {
   if (!homeId || !awayId) return res.status(400).json({ error: "Invalid team name" });
 
   try {
-    // 1. Fetch stats + H2H + game info + both team records (one standings call)
     const [homeStats, awayStats, h2h, gameInfo, records] = await Promise.all([
       fetchMLBStats(homeId),
       fetchMLBStats(awayId),
@@ -547,7 +546,6 @@ export default async function handler(req, res) {
     const homeRecord = records.home;
     const awayRecord = records.away;
 
-    // 2. Pitchers + lineup + weather + bullpen + injuries
     let homePitcher = null, awayPitcher = null, lineup = null, weather = null;
     const [hp, ap, lu, wx, homeFatigue, awayFatigue, homeInjuries, awayInjuries] = await Promise.all([
       gameInfo ? fetchPitcherStats(gameInfo.homeProbablePitcher?.id) : null,
@@ -566,13 +564,11 @@ export default async function handler(req, res) {
       weather = wx;
     }
 
-    // 3. Formula bases (0 LLM tokens — pure math on server)
     const formulaBases = computeFormulaBases({
       homeStats, awayStats, homeRecord, awayRecord, homePitcher, awayPitcher,
     });
     const basesBlock = formatBasesForPrompt(formulaBases, home, away);
 
-    // 4. Build compact context blocks
     const pitcherBlock = (homePitcher || awayPitcher) ? `
 ABRIDORES PROBABLES:
 - ${home}: ${homePitcher ? `${homePitcher.name} — ERA ${homePitcher.era} | WHIP ${homePitcher.whip} | K/9 ${homePitcher.strikeoutsPer9} | BB/9 ${homePitcher.walksPer9} | ${homePitcher.wins}-${homePitcher.losses}` : "No confirmado"}
@@ -603,6 +599,8 @@ ALINEACIÓN CONFIRMADA:
 `
       : "";
 
+    const bookBlock = formatBookLinesBlock(bookLines, home, away);
+
     const prompt = `Eres analista experto de MLB. Partido: ${away} (V) vs ${home} (L).
 
 ${basesBlock}
@@ -611,13 +609,13 @@ DATOS TEMPORADA ${new Date().getFullYear()}:
 ${home} — AVG ${homeStats.avg} OPS ${homeStats.ops} OBP ${homeStats.obp} | Carreras ${homeStats.runs} HR ${homeStats.homeRuns} | ERA ${homeStats.era} WHIP ${homeStats.whip} K/9 ${homeStats.strikeoutsPer9} | SV ${homeStats.saves}/${homeStats.blownSaves}
 ${away} — AVG ${awayStats.avg} OPS ${awayStats.ops} OBP ${awayStats.obp} | Carreras ${awayStats.runs} HR ${awayStats.homeRuns} | ERA ${awayStats.era} WHIP ${awayStats.whip} K/9 ${awayStats.strikeoutsPer9} | SV ${awayStats.saves}/${awayStats.blownSaves}
 H2H: ${home} ${h2h.homeWins}W - ${h2h.awayWins}W ${away} (${h2h.totalGames} juegos)
-${pitcherBlock}${lineupBlock}${weatherBlock}${fatigueBlock}${injuryBlock}
+${pitcherBlock}${lineupBlock}${weatherBlock}${fatigueBlock}${injuryBlock}${bookBlock}
 Responde SOLO JSON válido (sin markdown):
 {
   "home_win_pct": <entero, parte de Moneyline base y ajusta ±3 a ±8 pts solo con contexto de HOY>,
   "away_win_pct": <entero, suma 100 con home_win_pct>,
   "first_inning": { "scores": "SI|NO", "confidence_pct": <0-100>, "reasoning": "<1 oración>" },
-  "total_runs": { "line": <decimal desde base>, "pick": "OVER|UNDER", "confidence_pct": <0-100>, "reasoning": "<1 oración>" },
+  "total_runs": { "line": <decimal desde base o línea de banca>, "pick": "OVER|UNDER", "confidence_pct": <0-100>, "reasoning": "<1 oración>" },
   "home_team_runs": { "line": <decimal>, "pick": "OVER|UNDER", "confidence_pct": <0-100>, "reasoning": "<1 oración>" },
   "away_team_runs": { "line": <decimal>, "pick": "OVER|UNDER", "confidence_pct": <0-100>, "reasoning": "<1 oración>" },
   "first_five_innings": { "winner": "home|away", "confidence_pct": <0-100>, "reasoning": "<1 oración>" },
@@ -637,13 +635,13 @@ Responde SOLO JSON válido (sin markdown):
 
 REGLAS:
 - home_win_pct + away_win_pct = 100.
-- Parte SIEMPRE de las bases matemáticas; solo ajusta con contexto de hoy (abridores, clima, lesiones, alineación).
+- Parte SIEMPRE de las bases matemáticas; solo ajusta con contexto de hoy (abridores, clima, lesiones, alineación, líneas de banca).
 - Genera primero los 8 mercados con confidence_pct realistas y diferenciados; best_method = el de mayor % (mismo número); alternative = el 2º (mercado distinto).
 - Si no hay abridor confirmado, strikeouts_*.line/pick/confidence_pct = null y no elijas K.
 - Coherencia: el favorito del Moneyline debe alinearse con RL, F5 y proyecciones de carreras salvo razón específica (ej. abridor excepcional solo en F5).
-- Líneas numéricas realistas para MLB, no genéricas.`;
+- Líneas numéricas realistas para MLB, no genéricas.
+- Si hay LÍNEAS DE LA BANCA, usa esas líneas exactas en total_runs.line, home/away_team_runs.line, hce_total.line y strikeouts_*.line; pick OVER/UNDER respecto a ellas. Si tu proyección difiere ≥0.5, menciónalo en reasoning como posible value.`;
 
-    // 5. Call Groq
     const { res: groqRes, data: groqData, usedFailover } = await callGroqWithFailover({
       model: "llama-3.3-70b-versatile",
       max_tokens: 2900,
@@ -651,7 +649,7 @@ REGLAS:
       messages: [
         {
           role: "system",
-          content: "Analista experto MLB. Priorizas contexto del día (abridores, alineación) sobre promedios de temporada. JSON válido únicamente, sin markdown.",
+          content: "Analista experto MLB. Priorizas contexto del día (abridores, alineación, líneas de banca) sobre promedios de temporada. JSON válido únicamente, sin markdown.",
         },
         { role: "user", content: prompt },
       ],
@@ -705,6 +703,7 @@ REGLAS:
         gameDate: gameInfo?.gameDate || null,
         gamePk: gameInfo?.gamePk || null,
       },
+      bookLinesUsed: bookLines || null,
     });
   } catch (err) {
     console.error("Error:", err);
