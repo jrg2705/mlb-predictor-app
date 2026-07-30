@@ -1,12 +1,12 @@
 // api/phase3-data.js — Next-level context for analyze (compact prompt blocks).
-// 1) Park factors (static, runs index 100 = league average)
-// 2) Team recent form L10 (W-L + RPG from schedule)
-// 3) Starter rest days since last appearance
-// 4) Home/away splits (W-L from standings + OPS/ERA when API provides them)
+// 1) Park factors
+// 2) Team recent form L10
+// 3) Starter rest days
+// 4) Home/away splits
+// 5) High-leverage bullpen (closer + SV/BS + quality)
 
 const MLB_BASE = "https://statsapi.mlb.com/api/v1";
 
-/** Approximate runs park factor by home team id (100 = neutral). */
 const PARK_FACTOR_BY_TEAM_ID = {
   108: 98, 109: 102, 110: 101, 111: 104, 112: 100, 113: 103, 114: 99,
   115: 112, 116: 98, 117: 99, 118: 101, 119: 96, 120: 99, 121: 95,
@@ -34,7 +34,6 @@ export async function fetchTeamRecentForm(teamId, lastN = 10) {
     const end = new Date();
     const start = new Date();
     start.setDate(start.getDate() - 25);
-
     const res = await fetch(
       `${MLB_BASE}/schedule?sportId=1&teamId=${teamId}&startDate=${fmtDate(start)}&endDate=${fmtDate(end)}&gameType=R`
     );
@@ -58,13 +57,9 @@ export async function fetchTeamRecentForm(teamId, lastN = 10) {
       if (my?.isWinner) wins++;
       else losses++;
     }
-
     const n = games.length;
     return {
-      games: n,
-      wins,
-      losses,
-      record: `${wins}-${losses}`,
+      games: n, wins, losses, record: `${wins}-${losses}`,
       rpgScored: Math.round((runsScored / n) * 10) / 10,
       rpgAllowed: Math.round((runsAllowed / n) * 10) / 10,
     };
@@ -89,40 +84,22 @@ export async function fetchPitcherRestDays(pitcherId) {
     if (!lastDate) return { restDays: null, lastDate: null, note: "sin fecha de última salida" };
 
     const last = new Date(lastDate + "T12:00:00Z");
-    const restDays = Math.max(
-      0,
-      Math.floor((Date.now() - last.getTime()) / (24 * 60 * 60 * 1000))
-    );
+    const restDays = Math.max(0, Math.floor((Date.now() - last.getTime()) / (24 * 60 * 60 * 1000)));
 
     let note = "rest normal";
     if (restDays <= 3) note = "rest corto (posible fatiga / menos K proyectados)";
     else if (restDays >= 7) note = "rest largo (posible oxidación o boost fresco)";
-
     return { restDays, lastDate, note };
   } catch {
     return { restDays: null, lastDate: null, note: "rest no disponible" };
   }
 }
 
-/**
- * Home/away W-L from standings splitRecords + optional OPS/ERA from statSplits.
- */
 export async function fetchTeamHomeAwaySplits(teamId) {
-  const empty = {
-    homeRecord: null,
-    awayRecord: null,
-    homeOps: null,
-    awayOps: null,
-    homeEra: null,
-    awayEra: null,
-  };
-
+  const empty = { homeRecord: null, awayRecord: null, homeOps: null, awayOps: null, homeEra: null, awayEra: null };
   try {
     const season = new Date().getFullYear();
-
-    // 1) W-L home/away from standings (most reliable)
-    let homeRecord = null;
-    let awayRecord = null;
+    let homeRecord = null, awayRecord = null;
     try {
       const standRes = await fetch(
         `${MLB_BASE}/standings?leagueId=103,104&season=${season}&standingsTypes=regularSeason`
@@ -135,24 +112,19 @@ export async function fetchTeamHomeAwaySplits(teamId) {
       const away = splits.find((s) => s.type === "away");
       if (home) homeRecord = `${home.wins}-${home.losses}`;
       if (away) awayRecord = `${away.wins}-${away.losses}`;
-    } catch {
-      // keep nulls
-    }
+    } catch { /* keep nulls */ }
 
-    // 2) OPS home/away + ERA home/away from team statSplits (best-effort)
     let homeOps = null, awayOps = null, homeEra = null, awayEra = null;
-
     const loadSplitStat = async (group, sitCode) => {
       try {
         const res = await fetch(
           `${MLB_BASE}/teams/${teamId}/stats?stats=statSplits&group=${group}&season=${season}&sitCodes=${sitCode}`
         );
         const data = await res.json();
-        // Structure varies; try common paths
         const splits = data?.stats?.[0]?.splits || [];
         const match =
           splits.find((s) => {
-            const code = (s.split?.code || s.sport?.code || "").toLowerCase();
+            const code = (s.split?.code || "").toLowerCase();
             const desc = (s.split?.description || "").toLowerCase();
             if (sitCode === "h") return code === "h" || desc.includes("home");
             return code === "a" || desc.includes("away");
@@ -169,7 +141,6 @@ export async function fetchTeamHomeAwaySplits(teamId) {
       loadSplitStat("pitching", "h"),
       loadSplitStat("pitching", "a"),
     ]);
-
     if (hitHome?.ops) homeOps = hitHome.ops;
     if (hitAway?.ops) awayOps = hitAway.ops;
     if (pitHome?.era) homeEra = pitHome.era;
@@ -182,8 +153,69 @@ export async function fetchTeamHomeAwaySplits(teamId) {
 }
 
 /**
- * Fetch all phase-3 context for a matchup in parallel.
+ * High-leverage bullpen: primary closer (most saves), SV/BS, quality note.
+ * Complements the existing "relievers used last 3 days" fatigue block in analyze.js.
  */
+export async function fetchBullpenHighLeverage(teamId) {
+  const empty = {
+    closer: null,
+    closerSaves: null,
+    closerEra: null,
+    teamSaves: null,
+    teamBlownSaves: null,
+    savePct: null,
+    note: "bullpen sin datos de leverage",
+  };
+
+  try {
+    const season = new Date().getFullYear();
+
+    // Team-level SV / BS
+    let teamSaves = null, teamBlownSaves = null, savePct = null;
+    try {
+      const tRes = await fetch(
+        `${MLB_BASE}/teams/${teamId}/stats?stats=season&group=pitching&season=${season}`
+      );
+      const tData = await tRes.json();
+      const st = tData?.stats?.[0]?.splits?.[0]?.stat || {};
+      teamSaves = st.saves ?? null;
+      teamBlownSaves = st.blownSaves ?? null;
+      if (teamSaves != null && teamBlownSaves != null) {
+        const total = teamSaves + teamBlownSaves;
+        savePct = total > 0 ? Math.round((teamSaves / total) * 100) : null;
+      }
+    } catch { /* optional */ }
+
+    // Primary closer = pitcher with most saves on the team
+    let closer = null, closerSaves = null, closerEra = null;
+    try {
+      const pRes = await fetch(
+        `${MLB_BASE}/stats?stats=season&group=pitching&season=${season}&sportIds=1&teamId=${teamId}&playerPool=all&limit=20&order=desc&sortStat=saves`
+      );
+      const pData = await pRes.json();
+      const rows = pData?.stats?.[0]?.splits || [];
+      const top = rows.find((r) => (r.stat?.saves ?? 0) > 0) || rows[0];
+      if (top) {
+        closer = top.player?.fullName || null;
+        closerSaves = top.stat?.saves ?? null;
+        closerEra = top.stat?.era ?? null;
+      }
+    } catch { /* optional */ }
+
+    let note = "bullpen de leverage normal";
+    if (savePct != null) {
+      if (savePct >= 88 && (closerSaves ?? 0) >= 10) note = "cierre elite (alta conversión SV)";
+      else if (savePct >= 80) note = "cierre sólido";
+      else if (savePct < 70 && (teamBlownSaves ?? 0) >= 5) note = "cierre frágil (muchos BS) — riesgo en finales cerrados";
+      else if (savePct < 75) note = "cierre por debajo del promedio";
+    }
+
+    return { closer, closerSaves, closerEra, teamSaves, teamBlownSaves, savePct, note };
+  } catch {
+    return empty;
+  }
+}
+
 export async function fetchPhase3Context({
   homeId,
   awayId,
@@ -191,15 +223,21 @@ export async function fetchPhase3Context({
   awayPitcherId,
 }) {
   const park = getParkFactor(homeId);
-  const [homeForm, awayForm, homeRest, awayRest, homeSplits, awaySplits] =
-    await Promise.all([
-      fetchTeamRecentForm(homeId, 10),
-      fetchTeamRecentForm(awayId, 10),
-      fetchPitcherRestDays(homePitcherId),
-      fetchPitcherRestDays(awayPitcherId),
-      fetchTeamHomeAwaySplits(homeId),
-      fetchTeamHomeAwaySplits(awayId),
-    ]);
+  const [
+    homeForm, awayForm,
+    homeRest, awayRest,
+    homeSplits, awaySplits,
+    homeBullpen, awayBullpen,
+  ] = await Promise.all([
+    fetchTeamRecentForm(homeId, 10),
+    fetchTeamRecentForm(awayId, 10),
+    fetchPitcherRestDays(homePitcherId),
+    fetchPitcherRestDays(awayPitcherId),
+    fetchTeamHomeAwaySplits(homeId),
+    fetchTeamHomeAwaySplits(awayId),
+    fetchBullpenHighLeverage(homeId),
+    fetchBullpenHighLeverage(awayId),
+  ]);
 
   return {
     park,
@@ -209,17 +247,16 @@ export async function fetchPhase3Context({
     awayPitcherRest: awayRest,
     homeSplits,
     awaySplits,
+    homeBullpen,
+    awayBullpen,
   };
 }
 
-/**
- * Compact block for the LLM prompt.
- */
 export function formatPhase3ForPrompt(ctx, home, away) {
   if (!ctx) return "";
 
   const lines = [
-    "CONTEXTO FASE 3 (ajusta totales/K/F5/ML con esto; no ignores parque, forma ni splits):",
+    "CONTEXTO FASE 3 (ajusta ML/totales/K/F5/finales con esto; no ignores parque, forma, splits ni bullpen):",
   ];
 
   if (ctx.park) {
@@ -248,7 +285,6 @@ export function formatPhase3ForPrompt(ctx, home, away) {
     lines.push(`- Rest abridores: ${hPart} | ${aPart}`);
   }
 
-  // Home team plays at home; away team plays on the road — emphasize relevant split
   const hs = ctx.homeSplits;
   const as_ = ctx.awaySplits;
   if (hs || as_) {
@@ -256,20 +292,34 @@ export function formatPhase3ForPrompt(ctx, home, away) {
     if (hs?.homeRecord) homeBits.push(`casa ${hs.homeRecord}`);
     if (hs?.homeOps) homeBits.push(`OPS casa ${hs.homeOps}`);
     if (hs?.homeEra) homeBits.push(`ERA casa ${hs.homeEra}`);
-
     const awayBits = [];
     if (as_?.awayRecord) awayBits.push(`fuera ${as_.awayRecord}`);
     if (as_?.awayOps) awayBits.push(`OPS fuera ${as_.awayOps}`);
     if (as_?.awayEra) awayBits.push(`ERA fuera ${as_.awayEra}`);
-
     if (homeBits.length || awayBits.length) {
       lines.push(
         `- Splits relevantes: ${home} (${homeBits.join(", ") || "N/A"}) | ${away} (${awayBits.join(", ") || "N/A"})`
       );
-      lines.push(
-        `- Usa el split de CASA para el local y el de FUERA para el visitante al ajustar ML y totales.`
-      );
     }
+  }
+
+  const hb = ctx.homeBullpen;
+  const ab = ctx.awayBullpen;
+  if (hb || ab) {
+    const fmtBp = (label, bp) => {
+      if (!bp) return `${label}: N/A`;
+      const parts = [];
+      if (bp.closer) parts.push(`closer ${bp.closer}${bp.closerSaves != null ? ` (${bp.closerSaves} SV)` : ""}${bp.closerEra ? ` ERA ${bp.closerEra}` : ""}`);
+      if (bp.teamSaves != null && bp.teamBlownSaves != null) {
+        parts.push(`equipo ${bp.teamSaves} SV / ${bp.teamBlownSaves} BS${bp.savePct != null ? ` (${bp.savePct}%)` : ""}`);
+      }
+      if (bp.note) parts.push(bp.note);
+      return `${label}: ${parts.join(" — ") || "sin datos"}`;
+    };
+    lines.push(`- Bullpen leverage: ${fmtBp(home, hb)} | ${fmtBp(away, ab)}`);
+    lines.push(
+      `- Si el juego proyecta margen estrecho, el cierre frágil baja confianza en el favorito; cierre elite la sostiene.`
+    );
   }
 
   return lines.join("\n") + "\n";
