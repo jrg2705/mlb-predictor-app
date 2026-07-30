@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { HISTORY_KEY, MAX_HISTORY, loadHistory, saveToHistory, clearHistory } from "./historyStorage.js";
 import { DEFAULT_MIN_CONFIDENCE, CONFIDENCE_OPTIONS, isStrongPick } from "./strongPicks.js";
+import BookLinesPanel from "./BookLinesPanel.jsx";
+import { findBookLinesForMatchup } from "./bookLines.js";
 
 const TEAMS = [
   "New York Yankees", "Los Angeles Dodgers", "Houston Astros", "Atlanta Braves",
@@ -337,11 +339,12 @@ export default function MLBPredictor() {
   const [picksCount, setPicksCount] = useState(1);
   const [generatedPicks, setGeneratedPicks] = useState(null);
   const [verifying, setVerifying] = useState(false);
-  const [expertPicks, setExpertPicks] = useState(null); // { picks, overallAnalysis } from Gemini
+  const [expertPicks, setExpertPicks] = useState(null); // { picks, overallAnalysis } from Groq
   const [loadingExpertPicks, setLoadingExpertPicks] = useState(false);
   const [expertPicksError, setExpertPicksError] = useState("");
   const [expertPicksCount, setExpertPicksCount] = useState(5);
   const [minConfidence, setMinConfidence] = useState(DEFAULT_MIN_CONFIDENCE);
+  const [bookLines, setBookLines] = useState({ date: null, games: [], errors: [] });
 
   const [notifPermission, setNotifPermission] = useState(
     typeof Notification !== "undefined" ? Notification.permission : "unsupported"
@@ -1061,6 +1064,10 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
         <TabButton active={tab === "track"} onClick={() => setTab("track")}>🎯 Track Record</TabButton>
         <TabButton active={tab === "picks"} onClick={() => setTab("picks")}>🍀 Top Picks</TabButton>
         <TabButton active={tab === "standings"} onClick={() => setTab("standings")}>🏆 Posiciones</TabButton>
+      </div>
+
+      <div style={{ maxWidth: "680px", margin: "0 auto 8px" }}>
+        <BookLinesPanel bookLines={bookLines} onBookLinesChange={setBookLines} />
       </div>
 
       {tab === "predictor" && (
@@ -1876,7 +1883,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
           <div style={{ borderTop: "1px solid #1e3a52", marginTop: "28px", paddingTop: "24px" }}>
             <h2 style={{ fontSize: "16px", margin: "0 0 6px", color: "#F0F4F8" }}>🧠 Picks Expertos (IA independiente)</h2>
             <p style={{ fontSize: "11px", color: "#3a5a78", marginBottom: "16px" }}>
-              Un analista de IA independiente (Gemini) revisa TODOS los mercados de cada partido analizado hoy —no solo el mejor método—
+              Un analista de IA independiente (Groq) revisa TODOS los mercados de cada partido analizado hoy —no solo el mejor método—
               y arma los picks con criterio propio, priorizando coherencia entre mercados y calidad sobre porcentaje aislado.
               Solo el mercado de Ponches está limitado a {4} picks; los demás se eligen libremente por calidad.
             </p>
