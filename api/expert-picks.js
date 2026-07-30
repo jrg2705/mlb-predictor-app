@@ -1,13 +1,9 @@
 // api/expert-picks.js — Vercel Serverless Function
-// Uses Gemini (independent from Groq) as a dedicated "expert analyst" agent that
-// reviews ALL 8 markets of EVERY analyzed game for the day (not just Groq's
-// best_method/alternative_method), and builds the final Top Picks list with its
-// own objective, data-driven judgment — acting as a real MLB expert would.
-//
-// Only the "K" (Ponches) market is capped at 4 picks max, per sportsbook rules
-// the user specified. All other markets are chosen freely by confidence/quality.
+// Uses Groq (same dual-key failover as analyze.js) as an independent "expert analyst"
+// that reviews ALL markets of every analyzed game and builds Top Picks with its own judgment.
+// Only the "K" (Ponches) market is capped at 4 picks max, per sportsbook rules.
 
-const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
 const MAX_PONCHES_PICKS = 4;
 
 function buildGameSummary(entry) {
@@ -61,6 +57,39 @@ function buildGameSummary(entry) {
   return `PARTIDO: ${away} @ ${home}\n${pitcherInfo}\n${newsInfo}\n${markets.join("\n")}`;
 }
 
+async function callGroqWithFailover(payload) {
+  const primaryKey = process.env.GROQ_API_KEY;
+  const secondaryKey = process.env.GROQ_API_KEY_2;
+
+  const attempt = async (apiKey) => {
+    const res = await fetch(GROQ_API, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    return { res, data };
+  };
+
+  if (!primaryKey && !secondaryKey) {
+    return { res: { ok: false, status: 500 }, data: { error: { message: "GROQ_API_KEY no configurada" } }, usedFailover: false };
+  }
+
+  const first = await attempt(primaryKey || secondaryKey);
+  const isRateLimited = first.res.status === 429 || first.data?.error?.code === "rate_limit_exceeded";
+
+  if (isRateLimited && secondaryKey && primaryKey) {
+    console.log("Groq primary key rate-limited — retrying with secondary key (expert-picks)");
+    const second = await attempt(secondaryKey);
+    return { ...second, usedFailover: true };
+  }
+
+  return { ...first, usedFailover: false };
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -75,9 +104,8 @@ export default async function handler(req, res) {
   }
   const requestedCount = Math.min(Math.max(1, pickCount || 5), games.length);
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: "GEMINI_API_KEY no configurada en el servidor" });
+  if (!process.env.GROQ_API_KEY && !process.env.GROQ_API_KEY_2) {
+    return res.status(500).json({ error: "GROQ_API_KEY no configurada en el servidor" });
   }
 
   try {
@@ -116,73 +144,49 @@ Responde SOLO con un JSON válido, sin markdown, con esta estructura exacta:
 
 Ordena "picks" del que consideres de MAYOR a MENOR confianza real.`;
 
-    const callGemini = async (modelName) => {
-      const url = `${GEMINI_API_BASE}/${modelName}:generateContent?key=${apiKey}`;
-      const geminiRes = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.4,
-            maxOutputTokens: 8000,
-            response_mime_type: "application/json",
-          },
-        }),
-      });
-      const geminiData = await geminiRes.json();
-      return { geminiRes, geminiData };
-    };
+    const { res: groqRes, data: groqData, usedFailover } = await callGroqWithFailover({
+      model: "llama-3.3-70b-versatile",
+      max_tokens: 4000,
+      temperature: 0.4,
+      messages: [
+        {
+          role: "system",
+          content: "Analista experto MLB. Evalúas todos los mercados con criterio profesional. JSON válido únicamente, sin markdown.",
+        },
+        { role: "user", content: prompt },
+      ],
+    });
 
-    // Try the primary model first; if it's unavailable/deprecated (404 or explicit
-    // "no longer available" message), automatically retry with Google's model-agnostic
-    // "latest" alias, which self-updates as Google retires specific model versions —
-    // this avoids repeating today's issue when Google next deprecates a model.
-    let { geminiRes, geminiData } = await callGemini("gemini-3.5-flash");
-
-    const isModelUnavailable = geminiRes.status === 404 ||
-      (geminiData.error?.message || "").toLowerCase().includes("no longer available");
-
-    if (isModelUnavailable) {
-      console.log("Primary Gemini model unavailable, retrying with gemini-flash-latest");
-      ({ geminiRes, geminiData } = await callGemini("gemini-flash-latest"));
+    if (usedFailover) {
+      console.log("Expert-picks completed using secondary Groq key");
     }
 
-    if (!geminiRes.ok || geminiData.error) {
-      const errMsg = geminiData.error?.message || `Gemini respondió con estado ${geminiRes.status}`;
-      console.error("Gemini API error:", errMsg);
-      return res.status(502).json({ error: `Error de Gemini AI: ${errMsg}` });
+    if (!groqRes.ok || groqData.error) {
+      const errMsg = groqData.error?.message || `Groq respondió con estado ${groqRes.status}`;
+      console.error("Groq API error (expert-picks):", errMsg);
+      return res.status(502).json({ error: `Error de Groq AI: ${errMsg}` });
     }
 
-    const finishReason = geminiData.candidates?.[0]?.finishReason;
-    const text = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const text = groqData.choices?.[0]?.message?.content || "";
     const clean = text.replace(/```json|```/g, "").trim();
-
-    if (finishReason === "MAX_TOKENS") {
-      console.error("Gemini response truncated by MAX_TOKENS. Raw length:", clean.length);
-      return res.status(502).json({
-        error: "Gemini cortó la respuesta por límite de tokens (demasiados partidos para procesar de una vez). Intenta con menos picks solicitados, o vuelve a intentar.",
-      });
-    }
 
     let result;
     try {
       result = JSON.parse(clean);
     } catch (parseErr) {
-      console.error("Gemini JSON parse failed. finishReason:", finishReason, "Raw (first 800 chars):", clean.slice(0, 800));
+      console.error("Groq JSON parse failed (expert-picks). Raw (first 800 chars):", clean.slice(0, 800));
       return res.status(502).json({
-        error: "Gemini devolvió una respuesta mal formada. Intenta de nuevo.",
+        error: "Groq devolvió una respuesta mal formada. Intenta de nuevo.",
         details: parseErr.message,
       });
     }
 
-    // Enforce the Ponches (K) cap server-side as a safety net, in case Gemini
-    // didn't respect it exactly.
+    // Enforce the Ponches (K) cap server-side as a safety net
     let ponchesCount = 0;
     const finalPicks = [];
     for (const pick of result.picks || []) {
       if (pick.market === "K") {
-        if (ponchesCount >= MAX_PONCHES_PICKS) continue; // skip excess Ponches picks
+        if (ponchesCount >= MAX_PONCHES_PICKS) continue;
         ponchesCount++;
       }
       finalPicks.push(pick);
@@ -192,6 +196,7 @@ Ordena "picks" del que consideres de MAYOR a MENOR confianza real.`;
       picks: finalPicks,
       overallAnalysis: result.overall_analysis || null,
       totalGamesConsidered: games.length,
+      provider: "groq",
     });
   } catch (err) {
     console.error("Error:", err);
