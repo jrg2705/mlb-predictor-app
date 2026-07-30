@@ -485,13 +485,18 @@ export default function MLBPredictor() {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ home: homeTeam, away: awayTeam, gamePk: specificGamePk }),
+        body: JSON.stringify({
+          home: homeTeam,
+          away: awayTeam,
+          gamePk: specificGamePk,
+          bookLines: findBookLinesForMatchup(bookLines?.games, homeTeam, awayTeam) || undefined,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Error del servidor");
       setResult(data.analysis);
       setRealStats(data.realStats);
-      setGameContext(data.gameContext || null);
+      setGameContext({ ...(data.gameContext || {}), bookLinesUsed: data.bookLinesUsed || null });
       setIsFreshAnalysis(true);
 
       const entry = {
@@ -1275,6 +1280,28 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                       </span>
                     </div>
                   )}
+                </div>
+              )}
+
+              {gameContext?.bookLinesUsed && (
+                <div style={{
+                  background: "#142235", border: "1px solid #2D6A4F", borderRadius: "10px",
+                  padding: "12px 14px", marginBottom: "14px", fontSize: "12px", color: "#c5d8ea"
+                }}>
+                  <div style={{ fontSize: "11px", color: "#2D6A4F", fontWeight: 700, marginBottom: "6px" }}>
+                    📋 LÍNEAS DE LA BANCA APLICADAS
+                  </div>
+                  {(() => {
+                    const b = gameContext.bookLinesUsed;
+                    const bits = [];
+                    if (b.total != null) bits.push(`Total ${b.total}`);
+                    if (b.soloAway != null || b.soloHome != null) bits.push(`Solo V/L ${b.soloAway ?? "—"}/${b.soloHome ?? "—"}`);
+                    if (b.hce != null) bits.push(`HCE ${b.hce}`);
+                    if (b.kAway != null) bits.push(`K V ${b.kAway}`);
+                    if (b.kHome != null) bits.push(`K L ${b.kHome}`);
+                    if (b.mlAway != null || b.mlHome != null) bits.push(`ML ${b.mlAway ?? "—"}/${b.mlHome ?? "—"}`);
+                    return bits.join(" · ") || "Líneas cargadas";
+                  })()}
                 </div>
               )}
 
