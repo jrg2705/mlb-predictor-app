@@ -1,7 +1,4 @@
-// api/expert-picks.js — Vercel Serverless Function
-// Uses Groq (same dual-key failover as analyze.js) as an independent "expert analyst"
-// that reviews ALL markets of every analyzed game and builds Top Picks with its own judgment.
-// Only the "K" (Ponches) market is capped at 4 picks max, per sportsbook rules.
+// api/expert-picks.js — Independent expert using Groq + optional track-record calibration
 
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
 const MAX_PONCHES_PICKS = 4;
@@ -10,7 +7,6 @@ function buildGameSummary(entry) {
   const a = entry.analysis;
   const home = entry.home;
   const away = entry.away;
-
   const markets = [];
 
   if (a.home_win_pct != null) {
@@ -51,10 +47,24 @@ function buildGameSummary(entry) {
     : "Abridores no confirmados aún";
 
   const newsInfo = entry.newsUsed?.length > 0
-    ? `Noticias consideradas: ${entry.newsUsed.map(n => n.title).join(" | ")}`
+    ? `Noticias consideradas: ${entry.newsUsed.map((n) => n.title).join(" | ")}`
     : "Sin noticias adicionales buscadas para este partido";
 
   return `PARTIDO: ${away} @ ${home}\n${pitcherInfo}\n${newsInfo}\n${markets.join("\n")}`;
+}
+
+function formatCalibrationBlock(calibration) {
+  if (!Array.isArray(calibration) || calibration.length === 0) {
+    return `CALIBRACIÓN HISTÓRICA: aún sin datos suficientes. Prioriza First 5 (H) y 1er Inning SI/NO; evita Run Line (RL) salvo señal excepcional.`;
+  }
+  const lines = calibration.map((r) => {
+    const tag = r.avoid ? "EVITAR" : r.prefer ? "PRIORIZAR" : "neutral";
+    const pct = r.hitPct != null ? `${r.hitPct}%` : "n/d";
+    return `- ${r.market}: acierto histórico ${pct} (n=${r.samples || 0}) → ${tag}`;
+  });
+  return `CALIBRACIÓN CON TRACK RECORD REAL DEL USUARIO (obliga a respetarla):
+${lines.join("\n")}
+Reglas: casi nunca elijas mercados marcados EVITAR; prefiere PRIORIZAR aunque el % de confianza del análisis sea un poco menor; 1–3 picks de máxima calidad.`;
 }
 
 async function callGroqWithFailover(payload) {
@@ -66,7 +76,7 @@ async function callGroqWithFailover(payload) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(payload),
     });
@@ -75,14 +85,18 @@ async function callGroqWithFailover(payload) {
   };
 
   if (!primaryKey && !secondaryKey) {
-    return { res: { ok: false, status: 500 }, data: { error: { message: "GROQ_API_KEY no configurada" } }, usedFailover: false };
+    return {
+      res: { ok: false, status: 500 },
+      data: { error: { message: "GROQ_API_KEY no configurada" } },
+      usedFailover: false,
+    };
   }
 
   const first = await attempt(primaryKey || secondaryKey);
-  const isRateLimited = first.res.status === 429 || first.data?.error?.code === "rate_limit_exceeded";
+  const isRateLimited =
+    first.res.status === 429 || first.data?.error?.code === "rate_limit_exceeded";
 
   if (isRateLimited && secondaryKey && primaryKey) {
-    console.log("Groq primary key rate-limited — retrying with secondary key (expert-picks)");
     const second = await attempt(secondaryKey);
     return { ...second, usedFailover: true };
   }
@@ -98,7 +112,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { games, pickCount } = req.body;
+  const { games, pickCount, calibration = null } = req.body;
   if (!Array.isArray(games) || games.length === 0) {
     return res.status(400).json({ error: "games array is required" });
   }
@@ -110,60 +124,61 @@ export default async function handler(req, res) {
 
   try {
     const gamesSummary = games.map(buildGameSummary).join("\n\n---\n\n");
+    const calibBlock = formatCalibrationBlock(calibration);
 
-    const prompt = `Eres un analista experto de MLB con décadas de experiencia evaluando mercados de apuestas deportivas. Recibirás el análisis COMPLETO (los 8 mercados posibles) de ${games.length} partidos del día de hoy, ya generados con datos reales de la MLB Stats API, fórmulas sabermétricas validadas (Log5, Pythagorean Expectation), y noticias relevantes cuando aplique.
+    const prompt = `Eres un analista profesional de apuestas MLB (estilo sharp): buscas POCOS picks de alta calidad, no volumen.
 
-TU TAREA: selecciona los ${requestedCount} MEJORES picks del día, uno por partido como máximo, evaluando TODOS los mercados de cada partido con criterio propio de experto — NO te limites a elegir solo el mercado con el porcentaje más alto de forma mecánica. Actúa como lo haría un analista profesional real:
+${calibBlock}
 
-- Considera la naturaleza y volatilidad histórica de cada tipo de mercado (un Moneyline fuerte de 70%+ suele ser más confiable en la práctica que un SI/NO o Ponches al 65%, por la naturaleza de muestra pequeña de esos mercados).
-- Prioriza coherencia interna: si el Moneyline, Run Line, y ventaja ofensiva de un partido apuntan todos en la misma dirección, ese partido tiene una señal más sólida que uno con señales mezcladas o contradictorias entre mercados.
-- Usa las noticias y abridores confirmados como factor de desempate o de alerta (ej. una lesión reciente puede invalidar una ventaja estadística).
-- Es válido y esperado que elijas Moneyline (JC) cuando genuinamente sea la mejor opción de un partido — no lo evites por sistema.
-- Busca variedad natural entre partidos SOLO cuando la calidad/confianza sea genuinamente comparable entre dos opciones — nunca sacrifiques calidad por variedad artificial.
+Recibirás el análisis completo de ${games.length} partidos. Selecciona los ${requestedCount} MEJORES picks (máximo uno por partido).
 
-REGLA OBLIGATORIA DE LÍMITE: máximo ${MAX_PONCHES_PICKS} picks del mercado "K" (Ponches) en total en la lista final — esta es una restricción real de las casas de apuestas. Todos los demás mercados (JC, H, Solo, SI_NO, HCE, Linea, RL) NO tienen límite; puedes incluir tantos como consideres que genuinamente son los mejores.
+Criterio sharp:
+- Respeta la CALIBRACIÓN: prioriza mercados PRIORIZAR; evita EVITAR aunque el modelo muestre % alto.
+- Coherencia entre mercados del mismo partido > un % aislado inflado.
+- Value y contexto (abridor, noticias) importan más que maximizar confidence_pct.
+- Es válido elegir H (First 5) o SI_NO con confianza "media" si el historial los respalda.
+- No elijas RL salvo que la calibración deje de marcarlo EVITAR y la señal sea excepcional.
 
-PARTIDOS Y SUS ANÁLISIS COMPLETOS:
+REGLA: máximo ${MAX_PONCHES_PICKS} picks del mercado "K" (Ponches).
+
+PARTIDOS:
 
 ${gamesSummary}
 
-Responde SOLO con un JSON válido, sin markdown, con esta estructura exacta:
-
+Responde SOLO JSON válido, sin markdown:
 {
   "picks": [
     {
       "matchup": "<away> @ <home>",
       "market": "<JC|H|K|Solo|SI_NO|HCE|Linea|RL>",
-      "pick_summary": "<resumen claro del pick, máximo 15 palabras>",
-      "confidence_pct": <entero 0-100, tu propia evaluación de confianza como experto, no necesariamente igual al de un solo mercado>,
-      "expert_reasoning": "<por qué este es el mejor pick de ese partido específico, considerando coherencia entre mercados, contexto y noticias, 2-3 oraciones>"
+      "pick_summary": "<máx 15 palabras>",
+      "confidence_pct": <0-100, tu juicio calibrado>,
+      "expert_reasoning": "<2-3 oraciones; menciona si usaste calibración histórica>"
     }
   ],
-  "overall_analysis": "<análisis general del día en 2-3 oraciones: qué patrones viste, qué tan sólida es la jugada combinada>"
+  "overall_analysis": "<2-3 oraciones sobre la calidad del card de hoy>"
 }
 
-Ordena "picks" del que consideres de MAYOR a MENOR confianza real.`;
+Ordena picks de mayor a menor confianza real.`;
 
     const { res: groqRes, data: groqData, usedFailover } = await callGroqWithFailover({
       model: "llama-3.3-70b-versatile",
       max_tokens: 4000,
-      temperature: 0.4,
+      temperature: 0.35,
       messages: [
         {
           role: "system",
-          content: "Analista experto MLB. Evalúas todos los mercados con criterio profesional. JSON válido únicamente, sin markdown.",
+          content:
+            "Analista sharp MLB. Respeta calibración histórica del usuario. JSON válido sin markdown.",
         },
         { role: "user", content: prompt },
       ],
     });
 
-    if (usedFailover) {
-      console.log("Expert-picks completed using secondary Groq key");
-    }
+    if (usedFailover) console.log("Expert-picks used secondary Groq key");
 
     if (!groqRes.ok || groqData.error) {
-      const errMsg = groqData.error?.message || `Groq respondió con estado ${groqRes.status}`;
-      console.error("Groq API error (expert-picks):", errMsg);
+      const errMsg = groqData.error?.message || `Groq status ${groqRes.status}`;
       return res.status(502).json({ error: `Error de Groq AI: ${errMsg}` });
     }
 
@@ -174,32 +189,50 @@ Ordena "picks" del que consideres de MAYOR a MENOR confianza real.`;
     try {
       result = JSON.parse(clean);
     } catch (parseErr) {
-      console.error("Groq JSON parse failed (expert-picks). Raw (first 800 chars):", clean.slice(0, 800));
       return res.status(502).json({
         error: "Groq devolvió una respuesta mal formada. Intenta de nuevo.",
         details: parseErr.message,
       });
     }
 
-    // Enforce the Ponches (K) cap server-side as a safety net
+    // Cap K + soft-filter avoided markets if calibration provided
+    const avoidSet = new Set(
+      (Array.isArray(calibration) ? calibration : []).filter((c) => c.avoid).map((c) => c.market)
+    );
+
     let ponchesCount = 0;
     const finalPicks = [];
+    const deferred = [];
+
     for (const pick of result.picks || []) {
       if (pick.market === "K") {
         if (ponchesCount >= MAX_PONCHES_PICKS) continue;
         ponchesCount++;
       }
+      if (avoidSet.has(pick.market)) {
+        deferred.push(pick);
+        continue;
+      }
       finalPicks.push(pick);
+    }
+    // Only use avoided markets if we still need slots and nothing else remains
+    for (const pick of deferred) {
+      if (finalPicks.length >= requestedCount) break;
+      finalPicks.push({ ...pick, expert_reasoning: `${pick.expert_reasoning || ""} [Nota: mercado con historial débil]`.trim() });
     }
 
     return res.status(200).json({
-      picks: finalPicks,
+      picks: finalPicks.slice(0, requestedCount),
       overallAnalysis: result.overall_analysis || null,
       totalGamesConsidered: games.length,
       provider: "groq",
+      calibrationApplied: Array.isArray(calibration) && calibration.length > 0,
     });
   } catch (err) {
     console.error("Error:", err);
-    return res.status(500).json({ error: "Error al generar picks expertos", details: err.message });
+    return res.status(500).json({
+      error: "Error al generar picks expertos",
+      details: err.message,
+    });
   }
 }
