@@ -155,6 +155,32 @@ function buildVerifiableMarketsFromAnalysis(analysis, home, away) {
 // against the real game result, and records each outcome under its own market
 // type in the Track Record — so the breakdown reflects true per-market accuracy
 // across everything analyzed, not just whichever was picked as "best" that day.
+
+// D: Track best_method vs alternative_method hit rates independently
+function recordBestVsAlternative(entry, gameResult) {
+  const record = loadTrackRecord();
+  if (!record.byRank) record.byRank = { best: { total: 0, correct: 0 }, alternative: { total: 0, correct: 0 } };
+
+  const a = entry.analysis;
+  if (a?.best_method) {
+    const ok = evaluateBestMethod(a.best_method, gameResult);
+    if (ok !== null) {
+      record.byRank.best.total += 1;
+      if (ok) record.byRank.best.correct += 1;
+    }
+  }
+  if (a?.alternative_method) {
+    const ok = evaluateBestMethod(a.alternative_method, gameResult);
+    if (ok !== null) {
+      record.byRank.alternative.total += 1;
+      if (ok) record.byRank.alternative.correct += 1;
+    }
+  }
+
+  localStorage.setItem(TRACK_RECORD_KEY, JSON.stringify(record));
+  return record;
+}
+
 function recordAllMarketOutcomes(entry, gameResult) {
   const record = loadTrackRecord();
   const markets = buildVerifiableMarketsFromAnalysis(entry.analysis, entry.home, entry.away);
@@ -396,6 +422,7 @@ export default function MLBPredictor() {
         const gameResult = resultsByPk[entry.gamePk];
         if (gameResult && gameResult.final) {
           record = recordAllMarketOutcomes(entry, gameResult);
+          record = recordBestVsAlternative(entry, gameResult);
           const bestMethodCorrect = evaluateBestMethod(entry.analysis?.best_method, gameResult);
           updatedHistory = updatedHistory.map(e =>
             e.id === entry.id
@@ -1669,6 +1696,49 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
                   )}
                 </div>
               </div>
+
+
+              {(() => {
+                const br = trackRecord.byRank;
+                if (!br?.best?.total && !br?.alternative?.total) return null;
+                const bestPct = br.best?.total ? Math.round((br.best.correct / br.best.total) * 100) : null;
+                const altPct = br.alternative?.total ? Math.round((br.alternative.correct / br.alternative.total) * 100) : null;
+                return (
+                  <div style={{ background: "#142235", border: "1px solid #4A90D9", borderRadius: "12px", padding: "20px", marginTop: "14px" }}>
+                    <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "6px" }}>
+                      📊 MEJOR MÉTODO vs ALTERNATIVA (rank #1 vs #2)
+                    </div>
+                    <p style={{ fontSize: "10px", color: "#4a6a88", marginTop: 0, marginBottom: "14px" }}>
+                      Mide si el rank #1 está sobreconfiado frente al 2.º método del mismo partido
+                    </p>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                      {br.best?.total > 0 && (
+                        <div>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", marginBottom: "4px" }}>
+                            <span style={{ color: "#c5d8ea" }}>🏆 Mejor método (#1)</span>
+                            <span style={{ color: "#F0F4F8", fontWeight: 700 }}>{bestPct}% ({br.best.correct}/{br.best.total})</span>
+                          </div>
+                          <WinBar pct={bestPct} color={bestPct >= 55 ? "#2D6A4F" : "#c0392b"} />
+                        </div>
+                      )}
+                      {br.alternative?.total > 0 && (
+                        <div>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", marginBottom: "4px" }}>
+                            <span style={{ color: "#c5d8ea" }}>🥈 Alternativa (#2)</span>
+                            <span style={{ color: "#F0F4F8", fontWeight: 700 }}>{altPct}% ({br.alternative.correct}/{br.alternative.total})</span>
+                          </div>
+                          <WinBar pct={altPct} color={altPct >= 55 ? "#2D6A4F" : "#c0392b"} />
+                        </div>
+                      )}
+                    </div>
+                    {bestPct != null && altPct != null && altPct > bestPct + 5 && (
+                      <p style={{ fontSize: "11px", color: "#F4A261", marginTop: "12px", marginBottom: 0 }}>
+                        ⚠️ La alternativa acierta más que el #1 → Top Picks prioriza el 2.º cuando está cerca.
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
 
               {(() => {
                 const cal = getCalibrationSummary(trackRecord);

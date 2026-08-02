@@ -122,7 +122,7 @@ export function getCalibrationSummary(trackRecord) {
   if (prefer.length) advice.push(`Prioriza: ${prefer.slice(0, 4).join(", ")}.`);
   if (avoid.length) advice.push(`Evita o minimiza: ${avoid.join(", ")}.`);
   advice.push("Card mixto: 1 ML claro (≥58%) + 1 F5/SI_NO + resto; no solo un mercado.");
-  advice.push("Si el 2.º método está cerca del 1.º, prefiera el 2.º (menos sobreconfianza).");
+  advice.push("Rank #2 suele acertar más que #1: prioriza alternativa cuando esté cerca o ≥55%.");
   advice.push(bandNote);
 
   return {
