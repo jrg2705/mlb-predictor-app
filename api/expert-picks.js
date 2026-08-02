@@ -142,7 +142,7 @@ ${calibBlock}
 Recibirás el análisis completo de ${games.length} partidos. Selecciona los ${requestedCount} MEJORES picks (máximo uno por partido).
 
 REGLAS DE SELECCIÓN (obligatorias — el usuario comprobó que el "mejor método" solo suele fallar más que el 2.º y el ML):
-A) Si ALTERNATIVA está a ≤5 puntos de confianza del MEJOR_METODO, prefiere la ALTERNATIVA (el rank #1 suele estar sobreconfiado).
+A) Si ALTERNATIVA está a ≤10 puntos de confianza del MEJOR_METODO, prefiere la ALTERNATIVA: datos del usuario muestran que rank #2 acierta mucho más que #1.
 B) Si un partido tiene ML CLARO (≥58% en un lado), INCLUYE al menos un pick JC en el card cuando pidas 2+ picks. No ignores favoritos claros solo porque F5/K/SI_NO tengan % similar.
 F) CARD MIXTO: no llenes el card solo de F5 o solo de SI_NO o solo de K.
    - Máximo ${MAX_F5} pick de H (First 5)
