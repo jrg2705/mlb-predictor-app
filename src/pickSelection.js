@@ -1,8 +1,7 @@
-// src/pickSelection.js — Top Picks selection: A (prefer alt cerca) + B (forzar ML claro) + F (card mixto)
-// Usado por App.jsx
+// src/pickSelection.js — Top Picks: A (prefer #2) + B (ML ≥58%) + F (card mixto) + D support
 
 export const ML_CLEAR_PCT = 58;
-export const ALT_CLOSE_PTS = 5;
+export const ALT_CLOSE_PTS = 10; // datos usuario: #2 acierta mucho más que #1
 export const MAX_PER_MARKET = 2;
 export const MAX_F5 = 1;
 export const MAX_SI_NO = 1;
@@ -96,12 +95,17 @@ export function buildAllMarketsForEntry(entry, trackRecord, minConfidence, rankC
   if (best?.market && alt?.market && alt.market !== best.market) {
     const bConf = Number(best.confidence_pct) || 0;
     const aConf = Number(alt.confidence_pct) || 0;
-    if (bConf - aConf <= ALT_CLOSE_PTS && aConf > 0) {
+    // Datos usuario: rank #2 acierta mucho más que #1 (ej. 12 vs 5). Preferir alternativa.
+    if (aConf >= 55 && (bConf - aConf <= ALT_CLOSE_PTS || aConf >= bConf - 8)) {
       const hit = candidates.find((c) => c.market === alt.market);
       if (hit) {
         hit.confidence = Math.max(hit.confidence, aConf);
         hit.preferAlternative = true;
-        hit._altBoost = 0.04;
+        hit._altBoost = 0.08;
+      }
+      const bestHit = candidates.find((c) => c.market === best.market);
+      if (bestHit && best.market !== "JC") {
+        bestHit._altBoost = (bestHit._altBoost || 0) - 0.05;
       }
     }
   }
