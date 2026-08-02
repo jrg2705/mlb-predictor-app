@@ -1,7 +1,9 @@
-// api/expert-picks.js — Independent expert using Groq + optional track-record calibration
+// api/expert-picks.js — Independent expert using Groq + track-record calibration + A/B/F selection rules
 
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
-const MAX_PONCHES_PICKS = 4;
+const MAX_PONCHES_PICKS = 2; // tighter diversity
+const MAX_F5 = 1;
+const MAX_SI_NO = 1;
 
 function buildGameSummary(entry) {
   const a = entry.analysis;
@@ -10,7 +12,14 @@ function buildGameSummary(entry) {
   const markets = [];
 
   if (a.home_win_pct != null) {
-    markets.push(`- JC (Moneyline): ${home} ${a.home_win_pct}% | ${away} ${a.away_win_pct}%`);
+    const clear = Math.max(a.home_win_pct, a.away_win_pct) >= 58 ? " [ML CLARO ≥58%]" : "";
+    markets.push(`- JC (Moneyline): ${home} ${a.home_win_pct}% | ${away} ${a.away_win_pct}%${clear}`);
+  }
+  if (a.best_method) {
+    markets.push(`- MEJOR_METODO: ${a.best_method.market} — ${a.best_method.pick_summary} (${a.best_method.confidence_pct}%)`);
+  }
+  if (a.alternative_method) {
+    markets.push(`- ALTERNATIVA: ${a.alternative_method.market} — ${a.alternative_method.pick_summary} (${a.alternative_method.confidence_pct}%)`);
   }
   if (a.first_inning) {
     markets.push(`- SI_NO (1er inning): ${a.first_inning.scores} — ${a.first_inning.confidence_pct}% — ${a.first_inning.reasoning}`);
@@ -55,7 +64,7 @@ function buildGameSummary(entry) {
 
 function formatCalibrationBlock(calibration) {
   if (!Array.isArray(calibration) || calibration.length === 0) {
-    return `CALIBRACIÓN HISTÓRICA: aún sin datos suficientes. Prioriza First 5 (H) y 1er Inning SI/NO; evita Run Line (RL) salvo señal excepcional.`;
+    return `CALIBRACIÓN HISTÓRICA: aún sin datos suficientes. Prioriza First 5 (H) y 1er Inning SI/NO; evita Run Line (RL). Incluye ML si ≥58%.`;
   }
   const lines = calibration.map((r) => {
     const tag = r.avoid ? "EVITAR" : r.prefer ? "PRIORIZAR" : "neutral";
@@ -64,7 +73,7 @@ function formatCalibrationBlock(calibration) {
   });
   return `CALIBRACIÓN CON TRACK RECORD REAL DEL USUARIO (obliga a respetarla):
 ${lines.join("\n")}
-Reglas: casi nunca elijas mercados marcados EVITAR; prefiere PRIORIZAR aunque el % de confianza del análisis sea un poco menor; 1–3 picks de máxima calidad.`;
+Reglas: casi nunca elijas mercados marcados EVITAR; prefiere PRIORIZAR; card MIXTO.`;
 }
 
 async function callGroqWithFailover(payload) {
@@ -126,20 +135,22 @@ export default async function handler(req, res) {
     const gamesSummary = games.map(buildGameSummary).join("\n\n---\n\n");
     const calibBlock = formatCalibrationBlock(calibration);
 
-    const prompt = `Eres un analista profesional de apuestas MLB (estilo sharp): buscas POCOS picks de alta calidad, no volumen.
+    const prompt = `Eres un analista profesional de apuestas MLB (estilo sharp): buscas POCOS picks de alta calidad en un CARD MIXTO, no volumen ni un solo mercado.
 
 ${calibBlock}
 
 Recibirás el análisis completo de ${games.length} partidos. Selecciona los ${requestedCount} MEJORES picks (máximo uno por partido).
 
-Criterio sharp:
-- Respeta la CALIBRACIÓN: prioriza mercados PRIORIZAR; evita EVITAR aunque el modelo muestre % alto.
-- Coherencia entre mercados del mismo partido > un % aislado inflado.
-- Value y contexto (abridor, noticias) importan más que maximizar confidence_pct.
-- Es válido elegir H (First 5) o SI_NO con confianza "media" si el historial los respalda.
-- No elijas RL salvo que la calibración deje de marcarlo EVITAR y la señal sea excepcional.
-
-REGLA: máximo ${MAX_PONCHES_PICKS} picks del mercado "K" (Ponches).
+REGLAS DE SELECCIÓN (obligatorias — el usuario comprobó que el "mejor método" solo suele fallar más que el 2.º y el ML):
+A) Si ALTERNATIVA está a ≤5 puntos de confianza del MEJOR_METODO, prefiere la ALTERNATIVA (el rank #1 suele estar sobreconfiado).
+B) Si un partido tiene ML CLARO (≥58% en un lado), INCLUYE al menos un pick JC en el card cuando pidas 2+ picks. No ignores favoritos claros solo porque F5/K/SI_NO tengan % similar.
+F) CARD MIXTO: no llenes el card solo de F5 o solo de SI_NO o solo de K.
+   - Máximo ${MAX_F5} pick de H (First 5)
+   - Máximo ${MAX_SI_NO} pick de SI_NO
+   - Máximo ${MAX_PONCHES_PICKS} picks de K
+   - Incluye variedad: idealmente 1 ML + 1 F5 o SI_NO + resto calibrado
+- Respeta CALIBRACIÓN: evita EVITAR (sobre todo RL).
+- Coherencia entre mercados > un % aislado inflado.
 
 PARTIDOS:
 
@@ -153,10 +164,10 @@ Responde SOLO JSON válido, sin markdown:
       "market": "<JC|H|K|Solo|SI_NO|HCE|Linea|RL>",
       "pick_summary": "<máx 15 palabras>",
       "confidence_pct": <0-100, tu juicio calibrado>,
-      "expert_reasoning": "<2-3 oraciones; menciona si usaste calibración histórica>"
+      "expert_reasoning": "<2-3 oraciones; menciona si usaste ML claro, alternativa o calibración>"
     }
   ],
-  "overall_analysis": "<2-3 oraciones sobre la calidad del card de hoy>"
+  "overall_analysis": "<2-3 oraciones sobre la calidad del card de hoy y el mix de mercados>"
 }
 
 Ordena picks de mayor a menor confianza real.`;
@@ -169,7 +180,7 @@ Ordena picks de mayor a menor confianza real.`;
         {
           role: "system",
           content:
-            "Analista sharp MLB. Respeta calibración histórica del usuario. JSON válido sin markdown.",
+            "Analista sharp MLB. Card mixto: ML claro + diversidad. Prefiere alternativa si está cerca del best. Respeta calibración. JSON válido sin markdown.",
         },
         { role: "user", content: prompt },
       ],
@@ -195,12 +206,13 @@ Ordena picks de mayor a menor confianza real.`;
       });
     }
 
-    // Cap K + soft-filter avoided markets if calibration provided
     const avoidSet = new Set(
       (Array.isArray(calibration) ? calibration : []).filter((c) => c.avoid).map((c) => c.market)
     );
 
     let ponchesCount = 0;
+    let f5Count = 0;
+    let siNoCount = 0;
     const finalPicks = [];
     const deferred = [];
 
@@ -209,16 +221,26 @@ Ordena picks de mayor a menor confianza real.`;
         if (ponchesCount >= MAX_PONCHES_PICKS) continue;
         ponchesCount++;
       }
+      if (pick.market === "H") {
+        if (f5Count >= MAX_F5) continue;
+        f5Count++;
+      }
+      if (pick.market === "SI_NO") {
+        if (siNoCount >= MAX_SI_NO) continue;
+        siNoCount++;
+      }
       if (avoidSet.has(pick.market)) {
         deferred.push(pick);
         continue;
       }
       finalPicks.push(pick);
     }
-    // Only use avoided markets if we still need slots and nothing else remains
     for (const pick of deferred) {
       if (finalPicks.length >= requestedCount) break;
-      finalPicks.push({ ...pick, expert_reasoning: `${pick.expert_reasoning || ""} [Nota: mercado con historial débil]`.trim() });
+      finalPicks.push({
+        ...pick,
+        expert_reasoning: `${pick.expert_reasoning || ""} [Nota: mercado con historial débil]`.trim(),
+      });
     }
 
     return res.status(200).json({
@@ -227,6 +249,7 @@ Ordena picks de mayor a menor confianza real.`;
       totalGamesConsidered: games.length,
       provider: "groq",
       calibrationApplied: Array.isArray(calibration) && calibration.length > 0,
+      selectionRules: "A+B+F",
     });
   } catch (err) {
     console.error("Error:", err);
