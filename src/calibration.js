@@ -1,7 +1,5 @@
 // src/calibration.js — Convert Track Record into actionable pick quality rules.
-// Recalibrate anytime: advice is recomputed from the latest localStorage stats.
 
-/** Labels aligned with METHOD_LABELS in App.jsx */
 export const MARKET_LABELS = {
   H: "First 5 Innings",
   SI_NO: "1er Inning SI/NO",
@@ -13,24 +11,14 @@ export const MARKET_LABELS = {
   RL: "Run Line",
 };
 
-/** Minimum samples before trusting a market rate */
 export const MIN_SAMPLES = 25;
-
-/** Hit-rate floor to treat a market as "usable" */
 export const MIN_HIT_RATE = 0.54;
-
-/** Below this (with enough samples) → avoid */
 export const AVOID_HIT_RATE = 0.48;
 
-/**
- * Prior weights when sample is still small (seeded from long-run MLB edge intuition
- * + your observed Track Record: F5 best, RL worst).
- * Higher = preferred when rates are similar.
- */
 const PRIOR_WEIGHT = {
-  H: 1.15,
-  SI_NO: 1.08,
-  JC: 1.0,
+  H: 1.12,
+  SI_NO: 1.05,
+  JC: 1.08, // subido: el usuario ve mucho acierto en ML del análisis completo
   K: 0.95,
   Linea: 0.92,
   HCE: 0.9,
@@ -48,28 +36,19 @@ export function marketSamples(trackRecord, market) {
   return trackRecord?.byMarket?.[market]?.total || 0;
 }
 
-/**
- * Effective rate: blend empirical rate with prior when sample is small.
- */
 export function effectiveRate(trackRecord, market) {
   const n = marketSamples(trackRecord, market);
   const emp = marketHitRate(trackRecord, market);
-  const prior = 0.5 + (PRIOR_WEIGHT[market] - 1) * 0.15; // ~0.43–0.52 range
+  const prior = 0.5 + (PRIOR_WEIGHT[market] - 1) * 0.15;
   if (emp == null || n === 0) return prior;
-  // James-Stein style shrink toward prior until MIN_SAMPLES
   const w = Math.min(1, n / MIN_SAMPLES);
   return w * emp + (1 - w) * prior;
 }
 
-/**
- * Score used to rank candidate markets for Top Picks.
- * Combines model confidence with calibrated hit rate.
- */
 export function calibratedScore(market, confidencePct, trackRecord) {
   const conf = (Number(confidencePct) || 0) / 100;
   const rate = effectiveRate(trackRecord, market);
   const priorBoost = PRIOR_WEIGHT[market] || 1;
-  // Heavily weight historical edge; confidence is secondary (your data showed miscalibration)
   return rate * 0.65 + conf * 0.25 + (priorBoost - 1) * 0.1;
 }
 
@@ -77,7 +56,6 @@ export function isMarketAvoided(trackRecord, market) {
   const n = marketSamples(trackRecord, market);
   const emp = marketHitRate(trackRecord, market);
   if (n >= MIN_SAMPLES && emp != null && emp < AVOID_HIT_RATE) return true;
-  // Always soft-avoid RL until it proves itself
   if (market === "RL" && (emp == null || emp < 0.5 || n < MIN_SAMPLES)) return true;
   return false;
 }
@@ -86,13 +64,10 @@ export function isMarketPreferred(trackRecord, market) {
   const n = marketSamples(trackRecord, market);
   const emp = marketHitRate(trackRecord, market);
   if (n >= MIN_SAMPLES && emp != null && emp >= MIN_HIT_RATE) return true;
-  if (market === "H" || market === "SI_NO") return true; // structural prior
+  if (market === "H" || market === "SI_NO" || market === "JC") return true;
   return false;
 }
 
-/**
- * Re-rank market candidates: drop avoided, sort by calibrated score.
- */
 export function rankCalibratedMarkets(candidates, trackRecord, { allowAvoided = false } = {}) {
   if (!Array.isArray(candidates)) return [];
   let list = candidates.map((c) => ({
@@ -106,9 +81,6 @@ export function rankCalibratedMarkets(candidates, trackRecord, { allowAvoided = 
   return list;
 }
 
-/**
- * Compact summary for Track Record UI + expert-picks API.
- */
 export function getCalibrationSummary(trackRecord) {
   const markets = Object.keys(MARKET_LABELS);
   const rows = markets
@@ -135,7 +107,6 @@ export function getCalibrationSummary(trackRecord) {
   const correct = trackRecord?.correct || 0;
   const overallPct = total > 0 ? Math.round((correct / total) * 100) : null;
 
-  // Confidence band insight
   const bands = trackRecord?.byBand || {};
   let bandNote =
     "La confianza declarada aún no predice bien el acierto: prioriza mercado histórico, no solo el %.";
@@ -148,9 +119,10 @@ export function getCalibrationSummary(trackRecord) {
   }
 
   const advice = [];
-  if (prefer.length) advice.push(`Prioriza: ${prefer.slice(0, 3).join(", ")}.`);
+  if (prefer.length) advice.push(`Prioriza: ${prefer.slice(0, 4).join(", ")}.`);
   if (avoid.length) advice.push(`Evita o minimiza: ${avoid.join(", ")}.`);
-  advice.push("1–3 picks/día con value vs pizarra cuando puedas.");
+  advice.push("Card mixto: 1 ML claro (≥58%) + 1 F5/SI_NO + resto; no solo un mercado.");
+  advice.push("Si el 2.º método está cerca del 1.º, prefiera el 2.º (menos sobreconfianza).");
   advice.push(bandNote);
 
   return {
@@ -161,7 +133,6 @@ export function getCalibrationSummary(trackRecord) {
     preferLabels: prefer,
     avoidLabels: avoid,
     advice,
-    // Payload for expert-picks API
     forExpert: rows.map((r) => ({
       market: r.market,
       hitPct: r.hitPct,

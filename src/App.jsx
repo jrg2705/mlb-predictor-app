@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { HISTORY_KEY, MAX_HISTORY, loadHistory, saveToHistory, clearHistory } from "./historyStorage.js";
 import { DEFAULT_MIN_CONFIDENCE, CONFIDENCE_OPTIONS, isStrongPick } from "./strongPicks.js";
 import { getCalibrationSummary, rankCalibratedMarkets } from "./calibration.js";
+import { buildTopPicks as buildTopPicksMixed, buildAllMarketsForEntry as buildMarketsSel } from "./pickSelection.js";
 import BookLinesPanel from "./BookLinesPanel.jsx";
 import { findBookLinesForMatchup } from "./bookLines.js";
 
@@ -862,135 +863,16 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
     URL.revokeObjectURL(url);
   };
 
-  // Max picks allowed from the same market in a single Top Picks generation —
-  // mirrors typical sportsbook combined-parlay restrictions.
-  const MAX_PER_MARKET = 4;
+  // Top Picks: A (prefer alt cerca) + B (forzar ML ≥58%) + F (card mixto: ML + F5/SI_NO + resto)
+  // Lógica en pickSelection.js — máx 1 F5, 1 SI/NO, 2 por mercado; incluye Moneyline.
 
-  // Build a ranked list of every available market for one game, from its individual
-  // analysis fields, sorted by confidence descending. Used so Top Picks has more than
-  // just best_method/alternative_method to fall back on when a market is saturated.
-  // Filtered by minConfidence so only "picks fuertes" appear.
-  const buildAllMarketsForEntry = (entry) => {
-    const a = entry.analysis;
-    const { home, away } = entry;
-    const candidates = [];
+  const buildAllMarketsForEntry = (entry) =>
+    buildMarketsSel(entry, trackRecord, minConfidence, rankCalibratedMarkets);
 
-    if (a.first_inning?.confidence_pct != null) {
-      candidates.push({
-        market: "SI_NO", confidence: a.first_inning.confidence_pct,
-        pickSummary: `${a.first_inning.scores === "SI" ? "Anotan" : "NO anotan"} en el 1er inning`,
-      });
-    }
-    if (a.total_runs?.confidence_pct != null) {
-      candidates.push({
-        market: "Linea", confidence: a.total_runs.confidence_pct,
-        pickSummary: `${a.total_runs.pick} ${a.total_runs.line} carreras totales`,
-      });
-    }
-    if (a.home_team_runs?.confidence_pct != null) {
-      candidates.push({
-        market: "Solo", confidence: a.home_team_runs.confidence_pct,
-        pickSummary: `${home}: ${a.home_team_runs.pick} ${a.home_team_runs.line} carreras`,
-      });
-    }
-    if (a.away_team_runs?.confidence_pct != null) {
-      candidates.push({
-        market: "Solo", confidence: a.away_team_runs.confidence_pct,
-        pickSummary: `${away}: ${a.away_team_runs.pick} ${a.away_team_runs.line} carreras`,
-      });
-    }
-    if (a.first_five_innings?.confidence_pct != null) {
-      const winnerName = a.first_five_innings.winner === "home" ? home : away;
-      candidates.push({
-        market: "H", confidence: a.first_five_innings.confidence_pct,
-        pickSummary: `${winnerName} gana first 5 innings`,
-      });
-    }
-    if (a.strikeouts_home?.confidence_pct != null && a.strikeouts_home?.line != null) {
-      candidates.push({
-        market: "K", confidence: a.strikeouts_home.confidence_pct,
-        pickSummary: `${home} abridor: ${a.strikeouts_home.pick} ${a.strikeouts_home.line} ponches`,
-      });
-    }
-    if (a.strikeouts_away?.confidence_pct != null && a.strikeouts_away?.line != null) {
-      candidates.push({
-        market: "K", confidence: a.strikeouts_away.confidence_pct,
-        pickSummary: `${away} abridor: ${a.strikeouts_away.pick} ${a.strikeouts_away.line} ponches`,
-      });
-    }
-    if (a.hce_total?.confidence_pct != null) {
-      candidates.push({
-        market: "HCE", confidence: a.hce_total.confidence_pct,
-        pickSummary: `${a.hce_total.pick} ${a.hce_total.line} carreras+hits+errores`,
-      });
-    }
-    if (a.run_line?.confidence_pct != null) {
-      const favoredName = a.run_line.favored_team === "home" ? home : away;
-      candidates.push({
-        market: "RL", confidence: a.run_line.confidence_pct,
-        pickSummary: `${favoredName} ${a.run_line.covers === "SI" ? "cubre" : "no cubre"} ${a.run_line.spread}`,
-      });
-    }
+  const buildTopPicks = (count) =>
+    buildTopPicksMixed(todayAnalyzed, count, trackRecord, minConfidence, rankCalibratedMarkets, METHOD_LABELS);
 
-    // Calibración con Track Record: prioriza F5/SI_NO, evita RL y mercados con mal historial
-    const ranked = rankCalibratedMarkets(candidates, trackRecord);
-    return ranked.filter(c => c.confidence >= minConfidence);
-  };
-
-  const buildTopPicks = (count) => {
-    const eligible = todayAnalyzed.filter(entry => entry.analysis?.best_method);
-
-    // Shuffle first so the order games are considered in is random each time,
-    // not biased toward whichever was analyzed first.
-    const shuffled = [...eligible];
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
-
-    const marketCounts = {};
-    const picks = [];
-    const skippedForLater = []; // entries where every ranked market option was saturated
-
-    for (const entry of shuffled) {
-      if (picks.length >= count) break;
-
-      const allMarkets = buildAllMarketsForEntry(entry);
-      // Walk down this game's full ranked list (not just best/alternative) until
-      // we find a market that still has room under the cap.
-      const usable = allMarkets.find(m => (marketCounts[m.market] || 0) < MAX_PER_MARKET);
-
-      if (usable) {
-        marketCounts[usable.market] = (marketCounts[usable.market] || 0) + 1;
-        const isBest = allMarkets[0] === usable;
-        picks.push({
-          entry, market: usable.market, marketLabel: METHOD_LABELS[usable.market] || usable.market,
-          pickSummary: usable.pickSummary, confidence: usable.confidence, usedAlternative: !isBest,
-        });
-      } else {
-        skippedForLater.push(entry);
-      }
-    }
-
-    // Second pass: if we still need more picks and some were skipped, allow the
-    // top-ranked market through even over the cap rather than showing fewer picks than requested.
-    if (picks.length < count && skippedForLater.length > 0) {
-      for (const entry of skippedForLater) {
-        if (picks.length >= count) break;
-        const allMarkets = buildAllMarketsForEntry(entry);
-        const top = allMarkets[0];
-        if (!top) continue;
-        picks.push({
-          entry, market: top.market, marketLabel: METHOD_LABELS[top.market] || top.market,
-          pickSummary: top.pickSummary, confidence: top.confidence, usedAlternative: false, overCap: true,
-        });
-      }
-    }
-
-    return picks;
-  };
-
-  const handleGeneratePicks = () => {
+    const handleGeneratePicks = () => {
     setGeneratedPicks(buildTopPicks(picksCount));
   };
 
@@ -1830,9 +1712,8 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
         <div style={{ maxWidth: "680px", margin: "0 auto", animation: "fadeIn .4s ease" }}>
           <h2 style={{ fontSize: "16px", margin: "0 0 6px", color: "#F0F4F8" }}>🍀 Top Picks del Día</h2>
           <p style={{ fontSize: "11px", color: "#3a5a78", marginBottom: "20px" }}>
-            Elige cuántos partidos quieres y la app selecciona al azar entre los que ya analizaste hoy,
-            repartiendo automáticamente entre distintos mercados (máximo {MAX_PER_MARKET} picks del mismo mercado)
-            para respetar los límites típicos de las casas de apuestas. Solo se incluyen mercados con confianza ≥ umbral.
+            Selección mixta (A+B+F): incluye Moneyline si un equipo tiene ≥58%, prioriza el 2.º método si está cerca del 1.º,
+            y arma un card diversificado (máx. 1 F5, 1 SI/NO, 2 del mismo mercado). Solo mercados ≥ umbral.
           </p>
 
           {todayAnalyzed.length === 0 ? (
@@ -1939,7 +1820,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
           )}
 
           <p style={{ textAlign: "center", fontSize: "11px", color: "#3a5a78", marginTop: "16px" }}>
-            Selección calibrada con tu Track Record (prioriza F5/SI_NO, evita RL) · Solo mercados ≥ umbral · Datos reales de MLB.
+            Card mixto: ML claro (≥58%) + F5/SI_NO + resto calibrado · Evita RL · Prefiere alternativa si está cerca del mejor método.
           </p>
 
           <div style={{ borderTop: "1px solid #1e3a52", marginTop: "28px", paddingTop: "24px" }}>
