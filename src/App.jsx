@@ -554,6 +554,7 @@ export default function MLBPredictor() {
         home: homeTeam,
         away: awayTeam,
         analysis: data.analysis,
+        realStats: data.realStats || null,
         gameContext: data.gameContext || null,
         gamePk: data.gameContext?.gamePk || null,
         verified: false,
@@ -701,7 +702,7 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
     setHome(entry.home);
     setAway(entry.away);
     setResult(entry.analysis);
-    setRealStats(null);
+    setRealStats(entry.realStats || null);
     setGameContext(entry.gameContext || null);
     setIsFreshAnalysis(false);
     setNewsResult(entry.newsUsed?.length > 0 ? { newsFound: true, newsUsed: entry.newsUsed } : null);
@@ -801,7 +802,15 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
       lines.push(`Pitching: ${a.pitching_edge}`);
       lines.push(`Bullpen: ${a.bullpen_risk}`);
       lines.push(`Bateo: ${a.batting_edge}`);
-      lines.push(`H2H: ${a.h2h_note}`);
+      if (a.h2h_note) lines.push(`H2H: ${a.h2h_note}`);
+      const h2h = entry.realStats?.h2h;
+      if (h2h && h2h.totalGames > 0) {
+        lines.push(`Serie H2H ${h2h.season || new Date().getFullYear()}: ${entry.home} ${h2h.homeWins}W — ${entry.away} ${h2h.awayWins}W (${h2h.finalGames ?? h2h.totalGames} finalizados)`);
+        (h2h.games || []).filter(g => g.isFinal).forEach(g => {
+          const sc = (g.away?.score != null && g.home?.score != null) ? `${g.away.score}-${g.home.score}` : "?";
+          lines.push(`  ${g.date || "?"}  ${g.away?.name || "?"} @ ${g.home?.name || "?"}  ${sc}  → ${g.winnerName || "N/D"}`);
+        });
+      }
       lines.push(`Análisis final: ${a.analyst_take}`);
 
       if (entry.verified) {
@@ -1445,7 +1454,53 @@ Línea ${result.hce_total.line} → ${result.hce_total.pick} (${result.hce_total
               <div style={{ background: "linear-gradient(135deg,#142235,#0f1e2e)", border: "1px solid #1e3a52", borderRadius: "12px", padding: "20px" }}>
                 <div style={{ marginBottom: "14px" }}>
                   <div style={{ fontSize: "11px", color: "#F4A261", letterSpacing: "0.15em", marginBottom: "6px" }}>⚔️ HEAD TO HEAD</div>
-                  <p style={{ margin: 0, fontSize: "13px", color: "#c5d8ea", lineHeight: 1.5 }}>{result.h2h_note}</p>
+                  {result.h2h_note && (
+                    <p style={{ margin: "0 0 10px", fontSize: "13px", color: "#c5d8ea", lineHeight: 1.5 }}>{result.h2h_note}</p>
+                  )}
+                  {realStats?.h2h?.totalGames > 0 ? (
+                    <div style={{ background: "#0d1b2a", border: "1px solid #1e3a52", borderRadius: "8px", padding: "12px", marginBottom: "4px" }}>
+                      <div style={{ textAlign: "center", marginBottom: "10px", fontSize: "13px", color: "#e8f0f8" }}>
+                        <strong style={{ color: "#F4A261" }}>{home}</strong>
+                        {" "}{realStats.h2h.homeWins}W
+                        <span style={{ color: "#7a9ab8" }}> — </span>
+                        {realStats.h2h.awayWins}W{" "}
+                        <strong style={{ color: "#4A90D9" }}>{away}</strong>
+                        <div style={{ fontSize: "11px", color: "#7a9ab8", marginTop: "4px" }}>
+                          Temporada {realStats.h2h.season || new Date().getFullYear()} · {realStats.h2h.finalGames ?? realStats.h2h.totalGames} finalizados
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "6px", maxHeight: "220px", overflowY: "auto" }}>
+                        {(realStats.h2h.games || []).map((g) => {
+                          const score = g.isFinal && g.away?.score != null && g.home?.score != null
+                            ? `${g.away.score} – ${g.home.score}`
+                            : "—";
+                          return (
+                            <div key={g.gamePk || g.date} style={{
+                              display: "grid", gridTemplateColumns: "72px 1fr auto", gap: "8px",
+                              alignItems: "center", fontSize: "12px", padding: "6px 8px",
+                              background: "#142235", borderRadius: "6px",
+                            }}>
+                              <span style={{ color: "#7a9ab8" }}>{g.date || "?"}</span>
+                              <span style={{ color: "#c5d8ea" }}>
+                                {(g.away?.name || "?").split(" ").slice(-1)[0]} @ {(g.home?.name || "?").split(" ").slice(-1)[0]}
+                              </span>
+                              <span style={{ textAlign: "right" }}>
+                                <span style={{ color: "#e8f0f8", fontWeight: 600 }}>{score}</span>
+                                {g.isFinal && g.winnerName && (
+                                  <span style={{ display: "block", color: "#7dcea0", fontSize: "10px" }}>✅ {(g.winnerName || "").split(" ").slice(-1)[0]}</span>
+                                )}
+                                {!g.isFinal && (
+                                  <span style={{ display: "block", color: "#7a9ab8", fontSize: "10px" }}>{g.status || "Pendiente"}</span>
+                                )}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    <p style={{ margin: "0 0 8px", fontSize: "12px", color: "#7a9ab8" }}>Sin enfrentamientos previos esta temporada.</p>
+                  )}
                 </div>
                 <div style={{ borderTop: "1px solid #1e3a52", paddingTop: "14px" }}>
                   <div style={{ fontSize: "11px", color: "#4A90D9", letterSpacing: "0.15em", marginBottom: "6px" }}>🎙️ ANÁLISIS FINAL</div>
