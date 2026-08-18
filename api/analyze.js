@@ -472,7 +472,7 @@ REGLAS:
 - Si hay LÍNEAS DE LA BANCA, usa esas líneas exactas en total_runs/home/away/hce/strikeouts .line; pick OVER/UNDER respecto a ellas. Value si proyección difiere ≥0.5.`;
 
     const { res: groqRes, data: groqData, usedFailover } = await callGroqWithFailover({
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-120b",
       max_tokens: 2900,
       temperature: 0.3,
       messages: [

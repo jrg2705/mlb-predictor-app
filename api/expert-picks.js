@@ -173,7 +173,7 @@ Responde SOLO JSON válido, sin markdown:
 Ordena picks de mayor a menor confianza real.`;
 
     const { res: groqRes, data: groqData, usedFailover } = await callGroqWithFailover({
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-120b",
       max_tokens: 4000,
       temperature: 0.35,
       messages: [

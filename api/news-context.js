@@ -127,7 +127,7 @@ ${newsBlock}
 Responde SOLO con JSON, sin markdown: {"relevant": true|false, "reason": "<1 oración explicando qué noticia es relevante y por qué, o por qué ninguna aplica>"}`;
 
     const { res: relevanceRes, data: relevanceData } = await callGroqWithFailover({
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-120b",
       max_tokens: 200,
       temperature: 0.2,
       messages: [
@@ -188,7 +188,7 @@ Antes de responder, verifica que todos los campos actualizados sean coherentes e
 Responde SOLO con el JSON completo actualizado (misma estructura que el análisis previo, agregando "news_impact"), sin markdown ni texto adicional.`;
 
     const { res: groqRes, data: groqData } = await callGroqWithFailover({
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-120b",
       max_tokens: 3000,
       temperature: 0.3,
       messages: [
