@@ -131,7 +131,7 @@ Responde SOLO con JSON, sin markdown: {"relevant": true|false, "reason": "<1 ora
       max_tokens: 200,
       temperature: 0.2,
       messages: [
-        { role: "system", content: "Respondes siempre con JSON válido únicamente, sin texto adicional ni markdown." },
+        { role: "system", content: "Responde campos de texto en ESPAÑOL. Respondes siempre con JSON válido únicamente, sin texto adicional ni markdown." },
         { role: "user", content: relevancePrompt },
       ],
     });

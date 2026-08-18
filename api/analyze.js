@@ -461,6 +461,7 @@ Responde SOLO JSON válido (sin markdown):
 }
 
 REGLAS:
+- Idioma: TODOS los campos de texto (reasoning, pitching_edge, bullpen_risk, batting_edge, h2h_note, data_confidence_note, analyst_take, pick_summary) en ESPAÑOL.
 - home_win_pct + away_win_pct = 100.
 - Parte SIEMPRE de las bases matemáticas; ajusta con contexto de HOY (abridores, clima, lesiones, alineación, parque, forma L10, rest del pitcher, líneas de banca).
 - Genera primero los 8 mercados con confidence_pct realistas y diferenciados; best_method = el de mayor %; alternative = el 2º (mercado distinto).
@@ -476,7 +477,7 @@ REGLAS:
       max_tokens: 2900,
       temperature: 0.3,
       messages: [
-        { role: "system", content: "Analista experto MLB. Priorizas contexto del día (abridores, parque, forma L10, rest, líneas de banca) sobre promedios de temporada. JSON válido únicamente, sin markdown." },
+        { role: "system", content: "Analista experto MLB. Priorizas contexto del día (abridores, parque, forma L10, rest, líneas de banca) sobre promedios de temporada. TODO el texto de reasoning, pitching_edge, bullpen_risk, batting_edge, h2h_note, data_confidence_note y analyst_take DEBE estar en ESPAÑOL (castellano). JSON válido únicamente, sin markdown." },
         { role: "user", content: prompt },
       ],
     });

@@ -6,61 +6,49 @@ const MAX_F5 = 1;
 const MAX_SI_NO = 1;
 
 function buildGameSummary(entry) {
-  const a = entry.analysis;
+  // Compacto: solo números/picks (sin reasoning largos) para caber en TPM free ~8k
+  const a = entry.analysis || {};
   const home = entry.home;
   const away = entry.away;
-  const markets = [];
+  const lines = [];
 
   if (a.home_win_pct != null) {
-    const clear = Math.max(a.home_win_pct, a.away_win_pct) >= 58 ? " [ML CLARO ≥58%]" : "";
-    markets.push(`- JC (Moneyline): ${home} ${a.home_win_pct}% | ${away} ${a.away_win_pct}%${clear}`);
+    const clear = Math.max(a.home_win_pct, a.away_win_pct) >= 58 ? " [ML≥58%]" : "";
+    lines.push(`JC: ${home} ${a.home_win_pct}% | ${away} ${a.away_win_pct}%${clear}`);
   }
   if (a.best_method) {
-    markets.push(`- MEJOR_METODO: ${a.best_method.market} — ${a.best_method.pick_summary} (${a.best_method.confidence_pct}%)`);
+    lines.push(`MEJOR: ${a.best_method.market} ${a.best_method.pick_summary} (${a.best_method.confidence_pct}%)`);
   }
   if (a.alternative_method) {
-    markets.push(`- ALTERNATIVA: ${a.alternative_method.market} — ${a.alternative_method.pick_summary} (${a.alternative_method.confidence_pct}%)`);
+    lines.push(`ALT: ${a.alternative_method.market} ${a.alternative_method.pick_summary} (${a.alternative_method.confidence_pct}%)`);
   }
-  if (a.first_inning) {
-    markets.push(`- SI_NO (1er inning): ${a.first_inning.scores} — ${a.first_inning.confidence_pct}% — ${a.first_inning.reasoning}`);
-  }
-  if (a.total_runs) {
-    markets.push(`- Linea (Total carreras): ${a.total_runs.pick} ${a.total_runs.line} — ${a.total_runs.confidence_pct}% — ${a.total_runs.reasoning}`);
-  }
-  if (a.home_team_runs) {
-    markets.push(`- Solo (${home}): ${a.home_team_runs.pick} ${a.home_team_runs.line} — ${a.home_team_runs.confidence_pct}% — ${a.home_team_runs.reasoning}`);
-  }
-  if (a.away_team_runs) {
-    markets.push(`- Solo (${away}): ${a.away_team_runs.pick} ${a.away_team_runs.line} — ${a.away_team_runs.confidence_pct}% — ${a.away_team_runs.reasoning}`);
-  }
+  if (a.first_inning) lines.push(`SI_NO: ${a.first_inning.scores} (${a.first_inning.confidence_pct}%)`);
+  if (a.total_runs) lines.push(`Total: ${a.total_runs.pick} ${a.total_runs.line} (${a.total_runs.confidence_pct}%)`);
+  if (a.home_team_runs) lines.push(`Solo ${home}: ${a.home_team_runs.pick} ${a.home_team_runs.line} (${a.home_team_runs.confidence_pct}%)`);
+  if (a.away_team_runs) lines.push(`Solo ${away}: ${a.away_team_runs.pick} ${a.away_team_runs.line} (${a.away_team_runs.confidence_pct}%)`);
   if (a.first_five_innings) {
-    const winnerName = a.first_five_innings.winner === "home" ? home : away;
-    markets.push(`- H (First 5 Innings): gana ${winnerName} — ${a.first_five_innings.confidence_pct}% — ${a.first_five_innings.reasoning}`);
+    const w = a.first_five_innings.winner === "home" ? home : away;
+    lines.push(`F5: ${w} (${a.first_five_innings.confidence_pct}%)`);
   }
   if (a.strikeouts_home?.line != null) {
-    markets.push(`- K (Ponches abridor ${home}): ${a.strikeouts_home.pick} ${a.strikeouts_home.line} — ${a.strikeouts_home.confidence_pct}% — ${a.strikeouts_home.reasoning}`);
+    lines.push(`K ${home}: ${a.strikeouts_home.pick} ${a.strikeouts_home.line} (${a.strikeouts_home.confidence_pct}%)`);
   }
   if (a.strikeouts_away?.line != null) {
-    markets.push(`- K (Ponches abridor ${away}): ${a.strikeouts_away.pick} ${a.strikeouts_away.line} — ${a.strikeouts_away.confidence_pct}% — ${a.strikeouts_away.reasoning}`);
+    lines.push(`K ${away}: ${a.strikeouts_away.pick} ${a.strikeouts_away.line} (${a.strikeouts_away.confidence_pct}%)`);
   }
-  if (a.hce_total) {
-    markets.push(`- HCE (Carreras+Hits+Errores): ${a.hce_total.pick} ${a.hce_total.line} — ${a.hce_total.confidence_pct}% — ${a.hce_total.reasoning}`);
-  }
+  if (a.hce_total) lines.push(`HCE: ${a.hce_total.pick} ${a.hce_total.line} (${a.hce_total.confidence_pct}%)`);
   if (a.run_line) {
-    const favoredName = a.run_line.favored_team === "home" ? home : away;
-    markets.push(`- RL (Run Line ${a.run_line.spread}): ${favoredName} ${a.run_line.covers === "SI" ? "cubre" : "no cubre"} — ${a.run_line.confidence_pct}% — ${a.run_line.reasoning}`);
+    const t = a.run_line.favored_team === "home" ? home : away;
+    lines.push(`RL: ${t} ${a.run_line.spread} covers=${a.run_line.covers} (${a.run_line.confidence_pct}%)`);
   }
 
-  const pitcherInfo = entry.gameContext?.homePitcher || entry.gameContext?.awayPitcher
-    ? `Abridores: ${home} = ${entry.gameContext?.homePitcher?.name || "no confirmado"}, ${away} = ${entry.gameContext?.awayPitcher?.name || "no confirmado"}`
-    : "Abridores no confirmados aún";
+  const hp = entry.gameContext?.homePitcher?.fullName || entry.gameContext?.homePitcher?.name;
+  const ap = entry.gameContext?.awayPitcher?.fullName || entry.gameContext?.awayPitcher?.name;
+  const pitcherInfo = (hp || ap) ? `Abridores: ${ap || "?"} vs ${hp || "?"}` : "Abridores: N/D";
 
-  const newsInfo = entry.newsUsed?.length > 0
-    ? `Noticias consideradas: ${entry.newsUsed.map((n) => n.title).join(" | ")}`
-    : "Sin noticias adicionales buscadas para este partido";
-
-  return `PARTIDO: ${away} @ ${home}\n${pitcherInfo}\n${newsInfo}\n${markets.join("\n")}`;
+  return `PARTIDO: ${away} @ ${home}\n${pitcherInfo}\n${lines.join("\n")}`;
 }
+
 
 function formatCalibrationBlock(calibration) {
   if (!Array.isArray(calibration) || calibration.length === 0) {
@@ -135,7 +123,7 @@ export default async function handler(req, res) {
     const gamesSummary = games.map(buildGameSummary).join("\n\n---\n\n");
     const calibBlock = formatCalibrationBlock(calibration);
 
-    const prompt = `Eres un analista profesional de apuestas MLB (estilo sharp): buscas POCOS picks de alta calidad en un CARD MIXTO, no volumen ni un solo mercado.
+    const prompt = `Eres un analista profesional de apuestas MLB (estilo sharp). TODO el texto (razones, notes) en ESPAÑOL. Buscas POCOS picks de alta calidad en un CARD MIXTO, no volumen ni un solo mercado.
 
 ${calibBlock}
 
@@ -180,7 +168,7 @@ Ordena picks de mayor a menor confianza real.`;
         {
           role: "system",
           content:
-            "Analista sharp MLB. Card mixto: ML claro + diversidad. Prefiere alternativa si está cerca del best. Respeta calibración. JSON válido sin markdown.",
+            "Analista sharp MLB. Card mixto: ML claro + diversidad. Prefiere alternativa si está cerca del best. Respeta calibración. expert_reasoning y cualquier texto en ESPAÑOL. JSON válido sin markdown.",
         },
         { role: "user", content: prompt },
       ],
