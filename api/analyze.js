@@ -281,6 +281,30 @@ async function callGroqWithFailover(payload) {
 
 function enforceObjectiveBestMethod(analysis, home, away) {
   const candidates = [];
+  // JC / Moneyline: usa el % del favorito como confianza del mercado
+  if (analysis.home_win_pct != null && analysis.away_win_pct != null) {
+    const homePct = Number(analysis.home_win_pct);
+    const awayPct = Number(analysis.away_win_pct);
+    if (!Number.isNaN(homePct) && !Number.isNaN(awayPct)) {
+      if (homePct >= awayPct) {
+        candidates.push({
+          market: "JC", side: "home", line: null, pick: null, spread: null,
+          confidence_pct: homePct,
+          pick_summary: `${home} gana el partido (ML ${homePct}%)`,
+          reasoning: analysis.analyst_take || analysis.data_confidence_note || `Favorito local con ${homePct}% de probabilidad.`,
+          team_or_side: home,
+        });
+      } else {
+        candidates.push({
+          market: "JC", side: "away", line: null, pick: null, spread: null,
+          confidence_pct: awayPct,
+          pick_summary: `${away} gana el partido (ML ${awayPct}%)`,
+          reasoning: analysis.analyst_take || analysis.data_confidence_note || `Favorito visitante con ${awayPct}% de probabilidad.`,
+          team_or_side: away,
+        });
+      }
+    }
+  }
   if (analysis.first_inning?.confidence_pct != null) {
     candidates.push({ market: "SI_NO", side: "combined", line: null, pick: analysis.first_inning.scores, spread: null, confidence_pct: analysis.first_inning.confidence_pct, pick_summary: `${analysis.first_inning.scores === "SI" ? "Anotan" : "NO anotan"} en el 1er inning`, reasoning: analysis.first_inning.reasoning, team_or_side: "Ambos equipos" });
   }
@@ -303,7 +327,7 @@ function enforceObjectiveBestMethod(analysis, home, away) {
   if (analysis.strikeouts_away?.confidence_pct != null && analysis.strikeouts_away?.line != null) {
     candidates.push({ market: "K", side: "away", line: analysis.strikeouts_away.line, pick: analysis.strikeouts_away.pick, spread: null, confidence_pct: analysis.strikeouts_away.confidence_pct, pick_summary: `${away} abridor: ${analysis.strikeouts_away.pick} ${analysis.strikeouts_away.line} ponches`, reasoning: analysis.strikeouts_away.reasoning, team_or_side: away });
   }
-  if (analysis.hce_total?.confidence_pct != null) {
+  if (analysis.hce_total?.confidence_pct != null && analysis.hce_total?.line != null) {
     candidates.push({ market: "HCE", side: "combined", line: analysis.hce_total.line, pick: analysis.hce_total.pick, spread: null, confidence_pct: analysis.hce_total.confidence_pct, pick_summary: `${analysis.hce_total.pick} ${analysis.hce_total.line} carreras+hits+errores`, reasoning: analysis.hce_total.reasoning, team_or_side: "Ambos equipos" });
   }
   if (analysis.run_line?.confidence_pct != null) {
@@ -466,11 +490,14 @@ REGLAS:
 - Parte SIEMPRE de las bases matemáticas; ajusta con contexto de HOY (abridores, clima, lesiones, alineación, parque, forma L10, rest del pitcher, líneas de banca).
 - Genera primero los 8 mercados con confidence_pct realistas y diferenciados; best_method = el de mayor %; alternative = el 2º (mercado distinto).
 - Si no hay abridor confirmado, strikeouts_*.line/pick/confidence_pct = null y no elijas K.
+- Si NO hay línea HCE de la banca, hce_total = null (line/pick/confidence_pct null) y no elijas HCE como best/alternative.
+- El Moneyline (JC) compite por best_method/alternative_method: confidence_pct del favorito = max(home_win_pct, away_win_pct).
 - Coherencia: el favorito del Moneyline debe alinearse con RL, F5 y proyecciones de carreras salvo razón específica.
 - Parque ofensivo (PF≥103) → totales/HCE más altos; parque pitcher (PF≤97) → totales más bajos.
 - Forma L10 caliente/fría puede mover ±2 a ±5 pts vs temporada.
 - Rest corto (≤3d) del abridor → cautela en K y F5; rest largo (≥7d) → posible oxidación o frescura.
-- Si hay LÍNEAS DE LA BANCA, usa esas líneas exactas en total_runs/home/away/hce/strikeouts .line; pick OVER/UNDER respecto a ellas. Value si proyección difiere ≥0.5.`;
+- Si hay LÍNEAS DE LA BANCA, usa esas líneas exactas en total_runs/home/away/hce/strikeouts .line; pick OVER/UNDER respecto a ellas. Value si proyección difiere ≥0.5.
+- Sin línea HCE en banca → hce_total null. Sin K de abridor → strikeouts null.`;;
 
     const { res: groqRes, data: groqData, usedFailover } = await callGroqWithFailover({
       model: "openai/gpt-oss-120b",
@@ -501,6 +528,14 @@ REGLAS:
     }
 
     analysis = enforceMoneylineCoherence(analysis, home, away);
+
+    // HCE solo si la pizarra/archivo trae línea HCE (igual que K sin abridor)
+    const bookHce = bookLines?.hce;
+    const hasBookHce = bookHce != null && bookHce !== "" && !Number.isNaN(Number(bookHce));
+    if (!hasBookHce) {
+      analysis.hce_total = null;
+    }
+
     analysis = enforceObjectiveBestMethod(analysis, home, away);
 
     return res.status(200).json({
